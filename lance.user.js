@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.2.0
+// @version      0.2.1
 // @description  AI chat toolkit — export, Obsidian sync, Enter-as-newline, Caveman mode, Claude usage tracker, settings dashboard
 // @author       SolRaze
 // @homepageURL  https://github.com/SolRaze/lance
@@ -14,7 +14,7 @@
 // @include      *://claude.ai/*
 // @include      *://chat.deepseek.com/*
 // @include      *://deepseek.com/*
-// @include      *://yuanbao.tencent.com/*
+// @include      *://search.brave.com/ask*
 // @noframes
 // @run-at       document-idle
 // @grant        GM_addStyle
@@ -38,7 +38,7 @@
         host.includes("gemini.google.com")   ? "gemini"   :
         host.includes("claude.ai")           ? "claude"   :
         host.includes("deepseek.com")        ? "deepseek" :
-        host.includes("yuanbao.tencent.com") ? "yuanbao"  : "unknown";
+        host.includes("search.brave.com")    ? "brave"    : "unknown";
 
     const qs  = (sel, root = document) => root.querySelector(sel);
     const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -55,7 +55,7 @@
     //  SETTINGS  — deep-merge on load so new keys survive script updates
     // ═══════════════════════════════════════════════════════════════════════════
     const DEFAULTS = {
-        sites:         { chatGPT: true, gemini: true, claude: true, deepseek: true, yuanbao: true },
+        sites:         { chatGPT: true, gemini: true, claude: true, deepseek: true, brave: true },
         shortcuts:     { ctrl: true, meta: true, alt: false },
         obsFolder:     "Chat",
         obsTabCloseMs: 1500,
@@ -112,7 +112,7 @@
         if (P === "claude")   return qs('div.ProseMirror') || qs('[contenteditable="true"][data-placeholder]');
         if (P === "gemini")   return qs('rich-textarea .ql-editor') || qs('div[contenteditable="true"]');
         if (P === "deepseek") return qs('textarea#chat-input') || qs('textarea');
-        if (P === "yuanbao")  return qs('textarea');
+        if (P === "brave")    return qs('textarea') || qs('[contenteditable="true"]');
         return qs('textarea') || qs('div[contenteditable="true"]');
     }
 
@@ -156,6 +156,7 @@
 
     function applyCavemanIfActive() {
         if (!CFG.caveman?.enabled) return false;
+        if (P === "brave") return false;   // Brave: keyboard + export only, no caveman
         const el = getChatInput();
         if (!el) return false;
         const cur = getInputText(el);
@@ -212,6 +213,7 @@
     }
 
     function initCavemanPill() {
+        if (P==="brave") return;   // Brave: no caveman pill (keyboard + Obsidian still on)
         if (qs('#lance-cave-box')) { updateCavemanPill(); return; }
 
         const box = mkEl('div', { className: 'ai-export-drag-box' });
@@ -460,7 +462,7 @@
             const byZ=qsa('[style*="z-index"],div').find(el=>getComputedStyle(el).zIndex==="12");
             return sanitize(byZ?.textContent||qs('div[class*="chat-item--active"] span,li[class*="active"] .title,a[class*="active"] span')?.textContent);
         }
-        if (P==="yuanbao") return sanitize(qs("span.agent-dialogue__content--common__header__name__title")?.textContent);
+        if (P==="brave")   return sanitize(document.title.replace(/ - Ask Brave$/,'').trim().slice(0,50));
         return sanitize(document.title);
     }
 
@@ -493,7 +495,25 @@
     function renderAttachmentsMd(a){if(!a.length)return "";return "\n**Attachments:**\n"+a.map(x=>x.type==="image"?`![${x.name}](${x.src})`:`- \`${x.name}\``).join("\n")+"\n";}
 
     // ─── getElements ─────────────────────────────────────────────────────────────
-    function getElements(){const res=[];if(P==="chatGPT")res.push(...qsa("article"));else if(P==="gemini"){const q=qsa("user-query-content"),r=qsa("model-response");q.forEach((x,i)=>{res.push(x);if(r[i])res.push(r[i]);});}else if(P==="claude")res.push(...qsa('[data-testid="user-message"],.font-claude-response'));else if(P==="yuanbao")res.push(...qsa("div.agent-chat__list__item"));return res;}
+    function getElements(){
+        const res=[];
+        if(P==="chatGPT")res.push(...qsa("article"));
+        else if(P==="gemini"){const q=qsa("user-query-content"),r=qsa("model-response");q.forEach((x,i)=>{res.push(x);if(r[i])res.push(r[i]);});}
+        else if(P==="claude")res.push(...qsa('[data-testid="user-message"],.font-claude-response'));
+        else if(P==="brave"){
+            // Brave /ask: messages in document order — div.message.user then 1-3
+            // div.message.assistant.llm-output (selector skips div.message.augment = web results,
+            // and div.message.response-header). Boundary = the user div (NOT response-header,
+            // which was unconfirmed). Group user + its following assistants into ONE synthetic
+            // wrapper so the downstream i%2 Q/A pairing holds (see groupDeepSeekPairs rationale).
+            const nodes=qsa('div.message.user,div.message.assistant.llm-output');
+            let u=null,ais=[];
+            const flush=()=>{if(!u)return;res.push(u);const w=document.createElement('div');ais.forEach(a=>w.appendChild(a.cloneNode(true)));res.push(w);u=null;ais=[];};
+            nodes.forEach(n=>{if(n.classList.contains('user')){flush();u=n;}else if(u)ais.push(n);});
+            flush();
+        }
+        return res;
+    }
 
     // ─── File export ─────────────────────────────────────────────────────────────
     async function fileExport(fmt){
@@ -595,6 +615,7 @@
         if(P==="gemini") return qs('button[aria-label*="Send"],button[aria-label*="发送"],button[aria-label*="傳送"]');
         if(P==="deepseek"){const bc=qs(".bf38813a");if(!bc)return null;const btns=qsa('div[role="button"].ds-button',bc);for(let i=btns.length-1;i>=0;i--){const b=btns[i];if(!b.classList.contains('ds-button--disabled'))return b;}return null;}
         if(P==="claude") return qs('button[aria-label*="Send"]');
+        if(P==="brave"){const scope=qs('form')||document;return qs('button[type="submit"]:not([disabled])',scope)||qs('button[aria-label*="Ask" i]',scope)||qs('button[aria-label*="Send" i]',scope)||qs('button[type="submit"]',scope);}
         return null;
     }
     window.addEventListener("keydown",e=>{
@@ -776,7 +797,7 @@
         const hdr=document.createElement('div');Object.assign(hdr.style,{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'2px'});
         const htitle=document.createElement('div');Object.assign(htitle.style,{display:'flex',alignItems:'baseline',gap:'8px'});
         const hname=document.createElement('span');hname.textContent='lance';Object.assign(hname.style,{fontSize:'17px',fontWeight:'700',color:wht});
-        const hver=document.createElement('span');hver.textContent='v0.2.0';Object.assign(hver.style,{fontSize:'10px',color:fg2});
+        const hver=document.createElement('span');hver.textContent='v0.2.1';Object.assign(hver.style,{fontSize:'10px',color:fg2});
         htitle.appendChild(hname);htitle.appendChild(hver);
         const closeBtn=document.createElement('button');closeBtn.textContent='✕';Object.assign(closeBtn.style,{background:'none',border:'none',color:fg2,cursor:'pointer',fontSize:'16px',padding:'0',lineHeight:'1',transition:'color 0.1s'});
         closeBtn.addEventListener('mouseenter',()=>{closeBtn.style.color=wht;});closeBtn.addEventListener('mouseleave',()=>{closeBtn.style.color=fg2;});
@@ -786,7 +807,7 @@
 
         // ── Sites — collapsible dropdown ──
         dlg.appendChild(section('Export button — sites'));
-        const SITE_LABELS={chatGPT:'ChatGPT',gemini:'Gemini',claude:'Claude',deepseek:'DeepSeek',yuanbao:'Yuanbao'};
+        const SITE_LABELS={chatGPT:'ChatGPT',gemini:'Gemini',claude:'Claude',deepseek:'DeepSeek',brave:'Brave'};
 
         // Dropdown toggle button
         const sitesDropBtn=document.createElement('button');
