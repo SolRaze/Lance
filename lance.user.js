@@ -201,7 +201,7 @@
         const on  = CFG.caveman?.enabled;
         const lvl = (CFG.caveman?.level || 'ultra').toUpperCase();
         const label = cavemanBox.querySelector('#lance-cave-label');
-        if (label) label.textContent = on ? `◈ ${lvl}` : '◈ CAVE';
+        if (label) label.textContent = on ? lvl : 'CAVE';
         cavemanBox.style.background = on ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,27,0.9)';
         cavemanBox.style.color      = on ? '#111' : 'rgba(255,255,255,0.85)';
         cavemanBox.style.boxShadow  = on
@@ -215,8 +215,9 @@
 
         const box = mkEl('div', { className: 'ai-export-drag-box' });
         box.id = 'lance-cave-box';
-        box.innerHTML = `<div style="display:flex;align-items:center;gap:7px;pointer-events:none;">
-            <span id="lance-cave-label" style="font-size:13px;font-weight:700;letter-spacing:0.05em">◈ CAVE</span>
+        box.innerHTML = `<div class="lance-pill-inner">
+            <span style="font-size:13px;font-weight:700;width:14px;text-align:center">◈</span>
+            <span id="lance-cave-label" class="lance-pill-text" style="font-size:13px;font-weight:700;letter-spacing:0.05em">CAVE</span>
         </div>`;
 
         const menu = mkEl('div', { className: 'ai-export-menu-panel' });
@@ -254,7 +255,7 @@
                 CFG.caveman.level = val;
                 saveCfg(CFG); updateCavemanPill();
                 menu.querySelectorAll('.cave-lvl-btn').forEach(b => b._refresh?.());
-                menu.style.display = 'none';
+                box.classList.remove('open');
             };
             menu.appendChild(btn);
         });
@@ -284,18 +285,18 @@
 
         box.onclick = () => {
             if (moved) return;
-            if (menu.style.display !== 'flex') {
+            if (!box.classList.contains('open')) {
                 const rect=box.getBoundingClientRect(), isB=rect.top>window.innerHeight/2, isR=rect.left>window.innerWidth/2;
                 menu.className = 'ai-export-menu-panel';
                 menu.classList.add(isB ? isR ? 'pos-bottom-right':'pos-bottom-left' : isR ? 'pos-top-right':'pos-top-left');
                 menu.querySelectorAll('.cave-lvl-btn').forEach(b => b._refresh?.());
                 updateToggleBtn();
-                menu.style.display = 'flex';
+                box.classList.add('open');
             } else {
-                menu.style.display = 'none';
+                box.classList.remove('open');
             }
         };
-        document.addEventListener('click', e => { if (!cavemanBox?.contains(e.target)) menu.style.display = 'none'; });
+        document.addEventListener('click', e => { if (!cavemanBox?.contains(e.target)) cavemanBox?.classList.remove('open'); });
 
         // Mouse-click send intercept — capture phase, preventDefault, re-fire after inject
         document.addEventListener('click', e => {
@@ -881,9 +882,14 @@
     //  STYLES
     // ═══════════════════════════════════════════════════════════════════════════
     GM_addStyle(`
-        .ai-export-drag-box{position:fixed;z-index:2147483646;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(24,24,27,0.9);backdrop-filter:blur(14px);color:rgba(255,255,255,0.85);border-radius:100px;box-shadow:0 4px 24px rgba(0,0,0,0.4),0 0 0 1px rgba(255,255,255,0.07);cursor:move;user-select:none;padding:9px 18px;font-family:system-ui;font-size:13px;font-weight:600;transition:transform 0.15s,box-shadow 0.15s;white-space:nowrap;}
+        /* Collapsed = 42px circle. Opening reveals the label, which widens it into a pill. */
+        .ai-export-drag-box{position:fixed;z-index:2147483646;display:flex;align-items:center;justify-content:center;height:42px;min-width:42px;padding:0;background:rgba(24,24,27,0.9);backdrop-filter:blur(14px);color:rgba(255,255,255,0.85);border-radius:100px;box-shadow:0 4px 24px rgba(0,0,0,0.4),0 0 0 1px rgba(255,255,255,0.07);cursor:move;user-select:none;font-family:system-ui;font-size:13px;font-weight:600;transition:transform 0.15s,box-shadow 0.15s;white-space:nowrap;}
         .ai-export-drag-box:hover{transform:scale(1.04);color:#fff;box-shadow:0 6px 30px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.12);}
+        .lance-pill-inner{display:flex;align-items:center;justify-content:center;pointer-events:none;padding:0 14px;}
+        .lance-pill-text{box-sizing:border-box;max-width:0;padding-left:0;opacity:0;overflow:hidden;transition:max-width .22s cubic-bezier(.16,1,.3,1),padding-left .22s cubic-bezier(.16,1,.3,1),opacity .15s;}
+        .ai-export-drag-box.open .lance-pill-text{max-width:140px;padding-left:7px;opacity:1;}
         .ai-export-menu-panel{position:absolute;width:max-content;min-width:185px;background:#18181b;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:4px;display:none;flex-direction:column;gap:1px;box-shadow:0 12px 40px rgba(0,0,0,0.6);}
+        .ai-export-drag-box.open>.ai-export-menu-panel{display:flex;}
         .pos-bottom-right{bottom:calc(100% + 12px);right:0;transform-origin:bottom right;animation:aiPopUp .2s cubic-bezier(.16,1,.3,1);}
         .pos-bottom-left{bottom:calc(100% + 12px);left:0;transform-origin:bottom left;animation:aiPopUp .2s cubic-bezier(.16,1,.3,1);}
         .pos-top-right{top:calc(100% + 12px);right:0;transform-origin:top right;animation:aiPopDown .2s cubic-bezier(.16,1,.3,1);}
@@ -905,7 +911,7 @@
 
         const box=mkEl("div",{className:"ai-export-drag-box"});
         box.id='lance-export-box';
-        box.innerHTML=`<div style="display:flex;align-items:center;gap:7px;pointer-events:none;"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg><span>Export</span></div>`;
+        box.innerHTML=`<div class="lance-pill-inner"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg><span class="lance-pill-text">Export</span></div>`;
 
         const menu=mkEl("div",{className:"ai-export-menu-panel"});
         const addLabel=t=>menu.appendChild(Object.assign(document.createElement('div'),{className:'ai-export-section-label',textContent:t}));
@@ -913,7 +919,7 @@
         const addBtn=(icon,label,badge,fn)=>{
             const btn=mkEl("button",{className:'ai-export-menu-item'});
             btn.innerHTML=`<span style="font-family:monospace;font-size:10px;width:16px;text-align:center;opacity:.45;flex-shrink:0">${icon}</span><span style="margin-left:4px">${label}</span><span class="ai-export-badge">${badge}</span>`;
-            btn.onclick=e=>{e.stopPropagation();btn.classList.add('clicked');setTimeout(()=>{btn.classList.remove('clicked');menu.style.display='none';fn();},160);};
+            btn.onclick=e=>{e.stopPropagation();btn.classList.add('clicked');setTimeout(()=>{btn.classList.remove('clicked');box.classList.remove('open');fn();},160);};
             menu.appendChild(btn);
         };
 
@@ -941,14 +947,14 @@
         document.onmouseup=()=>{if(drag&&moved){GM_setValue('x',box.offsetLeft);GM_setValue('y',box.offsetTop);}drag=false;};
         box.onclick=()=>{
             if(moved)return;
-            if(menu.style.display!=='flex'){
+            if(!box.classList.contains('open')){
                 const rect=box.getBoundingClientRect(),isB=rect.top>window.innerHeight/2,isR=rect.left>window.innerWidth/2;
                 menu.className='ai-export-menu-panel';
                 menu.classList.add(isB?isR?'pos-bottom-right':'pos-bottom-left':isR?'pos-top-right':'pos-top-left');
-                menu.style.display='flex';
-            } else menu.style.display='none';
+                box.classList.add('open');
+            } else box.classList.remove('open');
         };
-        document.addEventListener("click",e=>{if(!box.contains(e.target))menu.style.display='none';});
+        document.addEventListener("click",e=>{if(!box.contains(e.target))box.classList.remove('open');});
     }
 
     GM_registerMenuCommand("⚙ Settings",openDashboard);
