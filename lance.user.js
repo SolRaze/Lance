@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.2.1
-// @description  AI chat toolkit — export, Obsidian sync, Enter-as-newline, Caveman mode, Claude usage tracker, settings dashboard
+// @version      0.3.0
+// @description  AI chat toolkit — export, Obsidian vault export, Enter-as-newline, Caveman mode, Claude usage tracker, settings dashboard
 // @author       SolRaze
 // @homepageURL  https://github.com/SolRaze/lance
 // @supportURL   https://github.com/SolRaze/lance/issues
@@ -20,12 +20,8 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_setClipboard
-// @grant        GM_openInTab
 // @grant        GM_registerMenuCommand
-// @grant        GM_xmlhttpRequest
-// @connect      127.0.0.1
-// @connect      claude.ai
+// @grant        GM_download
 // ==/UserScript==
 
 (function () {
@@ -57,8 +53,9 @@
     const DEFAULTS = {
         sites:         { chatGPT: true, gemini: true, claude: true, deepseek: true, brave: true },
         shortcuts:     { ctrl: true, meta: true, alt: false },
-        obsFolder:     "Chat",
-        obsTabCloseMs: 1500,
+        // Path is RELATIVE to the browser's download folder — a userscript cannot
+        // pick an absolute one. ~/Downloads/chats is a symlink to the vault folder.
+        obsFolder:     "chats",
         caveman:       { enabled: false, level: 'ultra' },
         usageTracker:  true,   // Claude inline usage tracker
     };
@@ -537,13 +534,35 @@
             else if(fmt==="md"){c=res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`\n# Q:\n${md(x)}\n\n# A:\n${md(res[i+1])}\n\n---\n`;return a;},"");m="text/markdown";}
             else{c=res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`\nQ:\n${txt(x)}\n\nA:\n${txt(res[i+1])}\n\n---\n`;return a;},"");}
         }
-        const u=URL.createObjectURL(new Blob([c.replace(/&amp;/g,"&")],{type:m}));
-        const a=Object.assign(document.createElement("a"),{href:u,download:`${fname}.${fmt}`});
+        anchorSave(c.replace(/&amp;/g,"&"),m,`${fname}.${fmt}`);
+    }
+
+    // Plain download — lands flat in the browser's download folder.
+    function anchorSave(text,mime,filename){
+        const u=URL.createObjectURL(new Blob([text],{type:mime}));
+        const a=Object.assign(document.createElement("a"),{href:u,download:filename});
         document.body.appendChild(a);a.click();
         setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(u);},0);
     }
 
+    // Download into a sub-folder of the browser's download folder. Only the
+    // userscript manager's download API can do this, so fall back to a flat
+    // download when it is unavailable or rejects the path.
+    function saveToSubPath(text,mime,relPath,flatName){
+        if(typeof GM_download!=="function"){anchorSave(text,mime,flatName);return;}
+        const bytes=new TextEncoder().encode(text);
+        let bin="";for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
+        GM_download({
+            url:`data:${mime};base64,${btoa(bin)}`,
+            name:relPath,
+            onerror:()=>anchorSave(text,mime,flatName),
+            ontimeout:()=>anchorSave(text,mime,flatName),
+        });
+    }
+
     // ─── Obsidian export ──────────────────────────────────────────────────────────
+    // Writes the note straight into the vault via the browser's download folder:
+    // <download folder>/<obsFolder>/<platform>/<name>.md
     async function obsidianExport(){
         let pairs_data=[], title, pairCount;
 
@@ -582,24 +601,11 @@
             `source: ${P}`,
             `url: "${document.URL}"`,
             `turns: ${pairCount}`,
-            "tags:",
-            "  - chat",
-            `  - ${P}`,
             "---","",""].join("\n");
 
-        GM_setClipboard(yaml+body.replace(/&amp;/g,"&"));
-        const folder=encodeURIComponent(CFG.obsFolder+"/"+P);
-        const obsUrl=`obsidian://new?file=${folder}%2F${encodeURIComponent(fname)}&clipboard`;
-        GM_xmlhttpRequest({
-            method:'POST',url:'http://127.0.0.1:27184/obsidian',
-            headers:{'Content-Type':'application/json'},
-            data:JSON.stringify({uri:obsUrl}),timeout:1500,
-            onload(r){try{if(JSON.parse(r.responseText).ok)return;}catch(_){}_obsidianTabFallback(obsUrl);},
-            onerror(){_obsidianTabFallback(obsUrl);},
-            ontimeout(){_obsidianTabFallback(obsUrl);},
-        });
+        const relPath=`${CFG.obsFolder.replace(/^\/+|\/+$/g,"")}/${P}/${fname}.md`;
+        saveToSubPath(yaml+body.replace(/&amp;/g,"&"),"text/markdown",relPath,`${fname}.md`);
     }
-    function _obsidianTabFallback(u){const tab=GM_openInTab(u,{active:false,insert:true});if(CFG.obsTabCloseMs>0&&tab&&typeof tab.close==="function")setTimeout(()=>tab.close(),CFG.obsTabCloseMs);}
 
     // ═══════════════════════════════════════════════════════════════════════════
     //  ENTER-AS-NEWLINE
@@ -785,9 +791,9 @@
 
         const section=t=>{const d=document.createElement('div');Object.assign(d.style,{fontSize:'10px',fontWeight:'700',letterSpacing:'0.1em',textTransform:'uppercase',color:fg2,padding:'18px 0 6px'});d.textContent=t;return d;};
 
-        const textInput=(val,onInput,opts={})=>{
-            const inp=document.createElement('input');inp.value=val;if(opts.type)inp.type=opts.type;if(opts.min)inp.min=opts.min;if(opts.max)inp.max=opts.max;if(opts.step)inp.step=opts.step;
-            Object.assign(inp.style,{background:bg3,border:`1px solid rgba(255,255,255,0.1)`,borderRadius:'6px',color:fg,padding:'5px 9px',fontSize:'12px',width:opts.width||'100%',boxSizing:'border-box',textAlign:opts.align||'left',outline:'none'});
+        const textInput=(val,onInput)=>{
+            const inp=document.createElement('input');inp.value=val;
+            Object.assign(inp.style,{background:bg3,border:`1px solid rgba(255,255,255,0.1)`,borderRadius:'6px',color:fg,padding:'5px 9px',fontSize:'12px',width:'100%',boxSizing:'border-box',textAlign:'left',outline:'none'});
             inp.addEventListener('focus',()=>{inp.style.borderColor='rgba(255,255,255,0.25)';});
             inp.addEventListener('blur',()=>{inp.style.borderColor='rgba(255,255,255,0.1)';});
             inp.oninput=()=>onInput(inp.value);return inp;
@@ -843,21 +849,13 @@
         // ── Obsidian ──
         dlg.appendChild(section('Obsidian'));
 
-        // Relay status
-        const relayRow=document.createElement('div');Object.assign(relayRow.style,{padding:'9px 0',borderBottom:`1px solid ${bd}`,display:'flex',justifyContent:'space-between',alignItems:'center'});
-        const relayLbl=document.createElement('span');relayLbl.textContent='lance-relay';relayLbl.style.color=fg;
-        const relayStatus=document.createElement('span');relayStatus.textContent='checking…';Object.assign(relayStatus.style,{fontSize:'11px',color:fg2});
-        relayRow.appendChild(relayLbl);relayRow.appendChild(relayStatus);dlg.appendChild(relayRow);
-        GM_xmlhttpRequest({method:'GET',url:'http://127.0.0.1:27184/ping',timeout:1200,
-            onload(r){try{if(JSON.parse(r.responseText).ok){relayStatus.textContent='● online';relayStatus.style.color='rgba(255,255,255,0.75)';return;}}catch(_){}relayStatus.textContent='● offline';relayStatus.style.color='rgba(255,255,255,0.25)';},
-            onerror(){relayStatus.textContent='● offline';relayStatus.style.color='rgba(255,255,255,0.25)';},
-            ontimeout(){relayStatus.textContent='● offline';relayStatus.style.color='rgba(255,255,255,0.25)';}});
-
         const folderWrap=document.createElement('div');Object.assign(folderWrap.style,{padding:'9px 0',borderBottom:`1px solid ${bd}`});
-        const folderLbl=document.createElement('div');folderLbl.textContent='Vault folder';Object.assign(folderLbl.style,{marginBottom:'6px',color:fg,fontSize:'12px'});
-        folderWrap.appendChild(folderLbl);folderWrap.appendChild(textInput(CFG.obsFolder,v=>{CFG.obsFolder=v.trim()||"Chat";saveCfg(CFG);}));
+        const folderLbl=document.createElement('div');folderLbl.textContent='Vault folder (under the browser download folder)';Object.assign(folderLbl.style,{marginBottom:'6px',color:fg,fontSize:'12px'});
+        const folderHint=document.createElement('div');folderHint.textContent=`Saves to ${CFG.obsFolder}/${P}/`;Object.assign(folderHint.style,{marginTop:'6px',color:fg2,fontSize:'10px'});
+        folderWrap.appendChild(folderLbl);
+        folderWrap.appendChild(textInput(CFG.obsFolder,v=>{CFG.obsFolder=v.trim().replace(/^\/+|\/+$/g,"")||"chats";saveCfg(CFG);folderHint.textContent=`Saves to ${CFG.obsFolder}/${P}/`;}));
+        folderWrap.appendChild(folderHint);
         dlg.appendChild(folderWrap);
-        dlg.appendChild(rowEl('Fallback tab close (ms, 0=off)',textInput(String(CFG.obsTabCloseMs),v=>{CFG.obsTabCloseMs=Math.max(0,parseInt(v)||0);saveCfg(CFG);},{type:'number',min:'0',max:'10000',step:'100',width:'72px',align:'right'})));
 
         // ── Caveman ──
         dlg.appendChild(section('Caveman mode'));

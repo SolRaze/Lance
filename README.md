@@ -1,29 +1,38 @@
 # lance
-AI chat toolkit — export, Obsidian sync, Enter-as-newline, settings dashboard.
+AI chat toolkit — export, Obsidian vault export, Enter-as-newline, Caveman mode,
+Claude usage tracker, settings dashboard.
 
-Supports: ChatGPT, Claude, Gemini, Grok, DeepSeek, Yuanbao
+Supports: ChatGPT, Claude, Gemini, DeepSeek, Brave (search.brave.com/ask)
 
 ## Files
 - `lance.user.js` — Tampermonkey userscript (install via tampermonkey.net)
-- `lance-relay.js` — Node.js localhost relay for silent Obsidian export (port 27184)
-- `autostart/lance-relay.plist` — macOS LaunchAgent
-- `autostart/lance-relay.service` — Linux systemd user service
 
-## Relay setup (macOS)
-```bash
-mkdir -p ~/.local/scripts
-cp lance-relay.js ~/.local/scripts/
-sed -i '' "s/YOURUSERNAME/$USER/g" autostart/lance-relay.plist
-cp autostart/lance-relay.plist ~/Library/LaunchAgents/user.lance.relay.plist
-launchctl load ~/Library/LaunchAgents/user.lance.relay.plist
-curl -s http://127.0.0.1:27184/ping | cat
+That is the whole project. v0.3.0 deleted the localhost relay daemon and its
+macOS/systemd autostart units; the export needs no background process.
+
+## Obsidian export
+
+No daemon, no `obsidian://` URI, no clipboard. The Obsidian menu entry saves a
+markdown file to a sub-folder of the **browser's download folder**:
+
+```
+<browser download folder>/<vault folder>/<platform>/<name>.md
 ```
 
-## Relay setup (Linux)
+A userscript cannot write to an absolute path, so the download folder is what
+points at the vault. On this machine that link is:
+
 ```bash
-mkdir -p ~/.local/scripts ~/.config/systemd/user
-cp lance-relay.js ~/.local/scripts/
-sed -i "s/YOUR_USERNAME/$USER/g" autostart/lance-relay.service
-cp autostart/lance-relay.service ~/.config/systemd/user/
-systemctl --user enable --now lance-relay
+ln -s /Users/sol/projects/chats ~/Downloads/chats
 ```
+
+Browser download folder stays `~/Downloads`; exports land in
+`~/Downloads/chats/claude/…` → `/Users/sol/projects/chats/claude/…`.
+
+Vault folder is editable in ⚙ Settings → Obsidian (default `chats`).
+
+### Requirements
+- Tampermonkey (uses `GM_download` for the sub-folder path). Without it the
+  export still works but drops the file flat in the download folder.
+- Browser must not be set to "always ask where to save each file", or the
+  sub-folder is ignored.
