@@ -1,38 +1,46 @@
 # lance
-AI chat toolkit — export, Obsidian vault export, Enter-as-newline, Caveman mode,
+Chat exporter with prompt-mode toggles — Markdown/JSON/CSV/TXT/HTML export,
+Enter-as-newline, Caveman and Ponytail prompt modes, first-prompt injection,
 Claude usage tracker, settings dashboard.
 
-Supports: ChatGPT, Claude, Gemini, DeepSeek, Brave (search.brave.com/ask)
+Supports: Claude, DeepSeek, Brave (search.brave.com/ask)
 
 ## Files
-- `lance.user.js` — Tampermonkey userscript (install via tampermonkey.net)
+- `lance.user.js` — the userscript (install via tampermonkey.net)
+- `skills/caveman/SKILL.md`, `skills/ponytail/SKILL.md` — source of truth for the
+  prompt-mode text embedded in the script
+- `skills/injection/` — your own first-prompt payloads, one file per vendor
 
-That is the whole project. v0.3.0 deleted the localhost relay daemon and its
-macOS/systemd autostart units; the export needs no background process.
+## Export
 
-## Obsidian export
+Five formats, all plain browser downloads. Markdown carries YAML frontmatter
+(title, date, source, url, turns) and one `## User` / `## Assistant` block per
+turn, so it drops straight into a vault without post-processing.
 
-No daemon, no `obsidian://` URI, no clipboard. The Obsidian menu entry saves a
-markdown file to a sub-folder of the **browser's download folder**:
+Where the file lands is the browser's business — it reuses the last folder you
+picked. Set that once, or turn on "always ask where to save each file" if you
+sort per download. No daemon, no vault path in the script.
 
-```
-<browser download folder>/<vault folder>/<platform>/<name>.md
-```
+## Prompt modes
 
-A userscript cannot write to an absolute path, so the download folder is what
-points at the vault. On this machine that link is:
+Both prepend to your message when you send with the configured shortcut, and
+stack: injection first, then ponytail, then caveman.
 
-```bash
-ln -s /Users/sol/projects/chats ~/Downloads/chats
-```
+- **Caveman** — compresses prose. Levels: lite / full / ultra.
+- **Ponytail** — governs code answers only (YAGNI ladder). Levels: lite / full / ultra.
+- **First-prompt injection** — fires once per tab, on the first message you send.
+  Per-site toggle, re-armable from the pill menu.
 
-Browser download folder stays `~/Downloads`; exports land in
-`~/Downloads/chats/claude/…` → `/Users/sol/projects/chats/claude/…`.
+Injection text is empty by default. Paste what you want into
+`INJECTION_PROMPTS` in the script, keyed by platform id (`claude`, `deepseek`);
+a site with no entry never shows the toggle.
 
-Vault folder is editable in ⚙ Settings → Obsidian (default `chats`).
+Caveman and Ponytail text is embedded in the script but its source of truth is
+`skills/`. Edit the skill, then update the matching const — they do not sync
+themselves.
 
-### Requirements
-- Tampermonkey (uses `GM_download` for the sub-folder path). Without it the
-  export still works but drops the file flat in the download folder.
-- Browser must not be set to "always ask where to save each file", or the
-  sub-folder is ignored.
+## UI
+
+Two draggable pills, collapsed to 42px circles and expanding on open. The
+export pill carries the lance mark; the prompt-mode pill shows the active
+level's initial and lights up whenever any mode is armed.

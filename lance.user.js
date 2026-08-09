@@ -1,16 +1,14 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.3.0
-// @description  AI chat toolkit — export, Obsidian vault export, Enter-as-newline, Caveman mode, Claude usage tracker, settings dashboard
+// @version      0.4.0
+// @description  Chat exporter — Markdown/JSON/CSV/TXT/HTML, Enter-as-newline, Caveman + Ponytail prompt modes, first-prompt injection, Claude usage tracker
 // @author       SolRaze
 // @homepageURL  https://github.com/SolRaze/lance
 // @supportURL   https://github.com/SolRaze/lance/issues
 // @downloadURL  https://github.com/SolRaze/lance/releases/latest/download/lance.user.js
 // @updateURL    https://github.com/SolRaze/lance/releases/latest/download/lance.user.js
 // @license      MIT
-// @include      *://chatgpt.com/*
-// @include      *://gemini.google.com/*
 // @include      *://claude.ai/*
 // @include      *://chat.deepseek.com/*
 // @include      *://deepseek.com/*
@@ -21,7 +19,6 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
-// @grant        GM_download
 // ==/UserScript==
 
 (function () {
@@ -30,11 +27,12 @@
     // ─── Platform ────────────────────────────────────────────────────────────────
     const host = window.location.hostname;
     const P =
-        host.includes("chatgpt.com")         ? "chatGPT"  :
-        host.includes("gemini.google.com")   ? "gemini"   :
         host.includes("claude.ai")           ? "claude"   :
         host.includes("deepseek.com")        ? "deepseek" :
         host.includes("search.brave.com")    ? "brave"    : "unknown";
+
+    // Pictogrammers "lance" (Memory icon set, MIT) — https://pictogrammers.com/library/memory/icon/lance/
+    const LANCE_ICON = `<svg class="lance-pill-icon" viewBox="0 0 22 22" fill="currentColor" aria-hidden="true"><path d="M5 19H3V17H4V16H5V15H6V14H5V13H6V12H7V11H9V10H10V9H11V8H13V7H14V6H15V5H16V4H18V3H19V4H18V6H17V7H16V8H15V9H14V11H13V12H12V13H11V15H10V16H9V17H8V16H7V17H6V18H5Z"/></svg>`;
 
     const qs  = (sel, root = document) => root.querySelector(sel);
     const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -51,12 +49,12 @@
     //  SETTINGS  — deep-merge on load so new keys survive script updates
     // ═══════════════════════════════════════════════════════════════════════════
     const DEFAULTS = {
-        sites:         { chatGPT: true, gemini: true, claude: true, deepseek: true, brave: true },
+        sites:         { claude: true, deepseek: true, brave: true },
         shortcuts:     { ctrl: true, meta: true, alt: false },
-        // Path is RELATIVE to the browser's download folder — a userscript cannot
-        // pick an absolute one. ~/Downloads/chats is a symlink to the vault folder.
-        obsFolder:     "chats",
         caveman:       { enabled: false, level: 'ultra' },
+        ponytail:      { enabled: false, level: 'full' },
+        // First-prompt injection: fires once per chat tab, per enabled site.
+        injection:     { enabled: false, sites: { claude: true, deepseek: true } },
         usageTracker:  true,   // Claude inline usage tracker
     };
 
@@ -89,25 +87,60 @@
     // Each level has `full` (self-contained instructions) and `short` (trigger only).
     // Claude already has caveman rules via system / Project Knowledge, so it uses
     // `short` (~20 tokens vs ~80). Other sites have no persistent context → `full`.
+    // Synced from skills/caveman/SKILL.md. That revision reversed two older rules that
+    // sound like compression but measure as zero saving under the tokenizer: invented
+    // abbreviations (cfg/impl/req/res) and causal arrows. Both are now banned — do not
+    // "optimise" them back in. DeepSeek carries no persistent rules, so it gets the full
+    // text inline; the exception cases are the first thing a model drops without it.
+    const CAVEMAN_SHARED =
+        `Never drop not/never/no/only/except — flipping meaning is worse than any token saved; ` +
+        `numbers and units exact. Standard acronyms (DB/API/HTTP) fine; never invent new ones ` +
+        `(cfg/impl/req/res/fn) and no causal arrows — both cost a token and save nothing. ` +
+        `Reply in the language I write in; compress the style, not the language. Never name or ` +
+        `announce the style, and never append a normal-prose recap. Drop the mode entirely for ` +
+        `security warnings, irreversible-action confirmations, multi-step sequences where ` +
+        `fragment order risks misreading, and anywhere compression itself creates ambiguity — ` +
+        `resume after. Code, commits and PRs: write normal.`;
     const CAVEMAN_PROMPTS = {
         lite:  {
-            full:  `[Caveman lite] Respond without filler or hedging. Keep full sentences and articles. Professional but tight. No pleasantries.\n\n---\n\n`,
+            full:  `[Caveman lite] Respond without filler, pleasantries or hedging. Keep articles and full sentences. Professional but tight. ${CAVEMAN_SHARED}\n\n---\n\n`,
             short: `[Caveman lite]\n\n---\n\n`,
         },
         full:  {
-            full:  `[Caveman full] Respond terse like smart caveman. Drop articles, fragments OK, short synonyms. Technical terms exact. Code blocks unchanged.\n\n---\n\n`,
+            full:  `[Caveman full] Respond terse like smart caveman. All technical substance stays, only fluff dies. Drop articles, filler and pleasantries. Fragments OK. Short synonyms (big not extensive). No decorative tables or emoji, no dumping long raw error logs — quote the shortest decisive line. Technical terms exact, code blocks unchanged, errors quoted exact. Pattern: [thing] [action] [reason]. [next step]. ${CAVEMAN_SHARED}\n\n---\n\n`,
             short: `[Caveman full]\n\n---\n\n`,
         },
         ultra: {
-            full:  `[Caveman ultra] CAVEMAN ULTRA. Maximum compression. Short phrases. No filler. No intro/outro. No repetition. Keep all technical facts. Preserve code, commands, errors, paths, names, URLs, numbers, and API names exactly. Use compact bullets. Do not omit important warnings.\n\n---\n\n`,
+            full:  `[Caveman ultra] Maximum compression. Strip conjunctions where cause-then-effect stays unambiguous. One word where one word is enough. State each fact once. No intro, no outro, no repetition. Never touch code symbols, function names, API names or error strings. ${CAVEMAN_SHARED}\n\n---\n\n`,
             short: `[Caveman ultra]\n\n---\n\n`,
         },
     };
 
+    // Ponytail — laziest-solution-that-works mode. Code answers only; it says nothing
+    // about prose, so it stacks with caveman rather than competing with it.
+    // Synced from skills/ponytail/SKILL.md
+    const PONYTAIL_LADDER =
+        `Before writing code, stop at the first rung that holds: 1. does this need to exist at all ` +
+        `(YAGNI), 2. does it already exist in this codebase, 3. does the standard library do it, ` +
+        `4. does a native platform feature cover it, 5. does an installed dependency solve it, ` +
+        `6. can it be one line, 7. only then the minimum code that works. `;
+    const PONYTAIL_PROMPTS = {
+        lite:  `[Ponytail lite] Build what I asked for, but name the lazier alternative in one line and let me pick. ${PONYTAIL_LADDER}Never add a dependency for what a few lines do.\n\n---\n\n`,
+        full:  `[Ponytail full] You are a lazy senior developer — lazy means efficient, not careless. The best code is the code never written. ${PONYTAIL_LADDER}The ladder runs after you understand the problem, not instead of it. Bug fix = root cause in the shared function, not a guard per caller. No unrequested abstractions, no boilerplate for later. Deletion over addition, boring over clever, shortest working diff wins. Never lazy about: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, anything explicitly asked for.\n\n---\n\n`,
+        ultra: `[Ponytail ultra] YAGNI extremist. Deletion before addition. ${PONYTAIL_LADDER}Ship the one-liner and question the rest of the requirement in the same breath. Mark deliberate shortcuts with a ponytail: comment naming the ceiling. Non-trivial logic leaves ONE runnable check behind — no frameworks, no fixtures. Never lazy about understanding the problem, input validation, data-loss handling, or security.\n\n---\n\n`,
+    };
+
+    // First-prompt injection — fires once per chat tab, before anything else.
+    // Paste the text you want prepended, per site. Keys must match the platform ids
+    // above; a site with no entry never shows the toggle.
+    // ponytail: a const beats a build step for a couple of short strings.
+    const INJECTION_PROMPTS = {
+        // claude:   `...`,
+        // deepseek: `...`,
+    };
+
     function getChatInput() {
-        if (P === "chatGPT")  return qs('#prompt-textarea');
         if (P === "claude")   return qs('div.ProseMirror') || qs('[contenteditable="true"][data-placeholder]');
-        if (P === "gemini")   return qs('rich-textarea .ql-editor') || qs('div[contenteditable="true"]');
         if (P === "deepseek") return qs('textarea#chat-input') || qs('textarea');
         if (P === "brave")    return qs('textarea') || qs('[contenteditable="true"]');
         return qs('textarea') || qs('div[contenteditable="true"]');
@@ -151,18 +184,44 @@
         }
     }
 
-    function applyCavemanIfActive() {
-        if (!CFG.caveman?.enabled) return false;
-        if (P === "brave") return false;   // Brave: keyboard + export only, no caveman
+    // Injection fires once per chat tab. sessionStorage, not GM_setValue: a reload of the
+    // same chat must not re-inject, but a new tab is a new session and should.
+    const INJECTED_KEY = 'lance_injected';
+    function injectionDue() {
+        if (!CFG.injection?.enabled) return false;
+        if (!CFG.injection.sites?.[P]) return false;
+        if (!INJECTION_PROMPTS[P]) return false;
+        try { return sessionStorage.getItem(INJECTED_KEY) !== '1'; } catch(_) { return false; }
+    }
+    function markInjected() { try { sessionStorage.setItem(INJECTED_KEY, '1'); } catch(_) {} }
+
+    let _lastPrefix = '';
+
+    // Builds one prefix out of every active mode, in order: first-prompt injection,
+    // then ponytail (code rules), then caveman (prose rules).
+    function buildPrefix() {
+        let out = '';
+        if (injectionDue()) out += INJECTION_PROMPTS[P];
+        if (CFG.ponytail?.enabled) out += PONYTAIL_PROMPTS[CFG.ponytail.level] || PONYTAIL_PROMPTS.full;
+        if (CFG.caveman?.enabled) {
+            const variant = CAVEMAN_PROMPTS[CFG.caveman.level] || CAVEMAN_PROMPTS.ultra;
+            out += (P === 'claude' ? variant.short : variant.full);   // Claude knows the rules already
+        }
+        return out;
+    }
+
+    function applyPrefixesIfActive() {
+        if (P === "brave") return false;   // Brave: keyboard + export only
         const el = getChatInput();
         if (!el) return false;
         const cur = getInputText(el);
         if (!cur) return false;
-        if (cur.startsWith('[Caveman')) return false;
-        const level   = CFG.caveman.level || 'ultra';
-        const variant = CAVEMAN_PROMPTS[level] || CAVEMAN_PROMPTS.ultra;
-        const useShort = P === 'claude';   // Claude knows caveman rules already
-        prependToInput(el, useShort ? variant.short : variant.full);
+        if (/^\[(Caveman|Ponytail|Session context)/.test(cur)) return false;
+        const prefix = buildPrefix();
+        if (!prefix) return false;
+        if (injectionDue()) markInjected();
+        _lastPrefix = prefix;
+        prependToInput(el, prefix);
         return true;
     }
 
@@ -172,18 +231,19 @@
     // node), so we (a) wait via rAF until getInputText() shows the prefix, then
     // (b) RE-FIND the submit button at click time. Falls back after ~30 frames.
     function clickSendWithCaveman() {
-        const injected = applyCavemanIfActive();
+        const injected = applyPrefixesIfActive();
         if (!injected) {
             const sb = findSubmit();
             if (sb && !sb.disabled) sb.click();
             return;
         }
         const el0 = getChatInput();
+        const head = _lastPrefix.slice(0, 12);
         let tries = 0;
         const fire = () => {
             const el  = getChatInput() || el0;
             const cur = el ? getInputText(el) : '';
-            if (cur.startsWith('[Caveman') || ++tries > 30) {
+            if (cur.startsWith(head) || ++tries > 30) {
                 const sb = findSubmit();          // re-find: React may have replaced node
                 if (sb && !sb.disabled) sb.click();
             } else {
@@ -200,25 +260,29 @@
         if (!cavemanBox) return;
         const on  = CFG.caveman?.enabled;
         const lvl = (CFG.caveman?.level || 'ultra').toUpperCase();
+        // Any prompt mode being armed lights the pill — otherwise ponytail or a pending
+        // injection would fire with nothing on screen saying so.
+        const armed = on || CFG.ponytail?.enabled || (CFG.injection?.enabled && CFG.injection.sites?.[P]);
         const label = cavemanBox.querySelector('#lance-cave-label');
-        if (label) label.textContent = on ? lvl : 'CAVE';
-        cavemanBox.style.background = on ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,27,0.9)';
-        cavemanBox.style.color      = on ? '#111' : 'rgba(255,255,255,0.85)';
-        cavemanBox.style.boxShadow  = on
+        const icon  = cavemanBox.querySelector('#lance-cave-icon');
+        if (label) label.textContent = on ? lvl : (CFG.ponytail?.enabled ? 'PONY' : 'CAVE');
+        if (icon)  icon.textContent  = on ? lvl[0] : (CFG.ponytail?.enabled ? 'P' : 'C');
+        cavemanBox.style.background = armed ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,27,0.9)';
+        cavemanBox.style.color      = armed ? '#111' : 'rgba(255,255,255,0.85)';
+        cavemanBox.style.boxShadow  = armed
             ? '0 4px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.2)'
             : '0 4px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.07)';
     }
 
     function initCavemanPill() {
-        if (P==="brave") return;   // Brave: no caveman pill (keyboard + Obsidian still on)
+        if (P==="brave") return;   // Brave: no prompt-mode pill (keyboard + export still on)
         if (qs('#lance-cave-box')) { updateCavemanPill(); return; }
 
         const box = mkEl('div', { className: 'ai-export-drag-box' });
         box.id = 'lance-cave-box';
-        box.innerHTML = `<div class="lance-pill-inner">
-            <span style="font-size:13px;font-weight:700;width:14px;text-align:center">◈</span>
-            <span id="lance-cave-label" class="lance-pill-text" style="font-size:13px;font-weight:700;letter-spacing:0.05em">CAVE</span>
-        </div>`;
+        // Collapsed, this pill has to say something the export pill doesn't: the mark is
+        // the active level's initial, so state reads without opening the menu.
+        box.innerHTML = `<div class="lance-pill-inner"><span id="lance-cave-icon" class="lance-pill-icon" style="font-size:13px;font-weight:700">C</span><span id="lance-cave-label" class="lance-pill-text" style="font-size:13px;font-weight:700;letter-spacing:0.05em">CAVE</span></div>`;
 
         const menu = mkEl('div', { className: 'ai-export-menu-panel' });
 
@@ -260,6 +324,73 @@
             menu.appendChild(btn);
         });
 
+        // ── Ponytail — same shape as caveman, governs code instead of prose ──
+        menu.appendChild(mkEl('div', { className: 'ai-export-menu-divider' }));
+        menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'Ponytail (code)' }));
+
+        const ponyBtn = mkEl('button', { className: 'ai-export-menu-item' });
+        const updatePonyBtn = () => {
+            const on = CFG.ponytail?.enabled;
+            ponyBtn.innerHTML = `<span style="flex:1">${on ? 'Enabled' : 'Disabled'}</span><span class="ai-export-badge">${on ? (CFG.ponytail.level||'full').toUpperCase() : 'OFF'}</span>`;
+        };
+        updatePonyBtn();
+        ponyBtn.onclick = e => {
+            e.stopPropagation();
+            CFG.ponytail = { ...(CFG.ponytail || DEFAULTS.ponytail), enabled: !CFG.ponytail?.enabled };
+            saveCfg(CFG); updatePonyBtn(); updateCavemanPill();
+        };
+        menu.appendChild(ponyBtn);
+
+        [['lite','Lite','Simplest thing that works'],['full','Full','Lazy senior dev'],['ultra','Ultra','YAGNI extremist']].forEach(([val,name,desc]) => {
+            const btn = mkEl('button', { className: 'ai-export-menu-item pony-lvl-btn' });
+            const refresh = () => {
+                const active = (CFG.ponytail?.level || 'full') === val;
+                btn.innerHTML = `<span style="flex:1">${name}<span style="display:block;font-size:10px;opacity:0.45;font-weight:400">${desc}</span></span><span class="ai-export-badge">${active ? '●' : ''}</span>`;
+                btn.style.color = active ? '#fff' : '';
+            };
+            refresh(); btn._refresh = refresh;
+            btn.onclick = e => {
+                e.stopPropagation();
+                CFG.ponytail = { ...(CFG.ponytail || DEFAULTS.ponytail), level: val };
+                saveCfg(CFG); updatePonyBtn(); updateCavemanPill();
+                menu.querySelectorAll('.pony-lvl-btn').forEach(b => b._refresh?.());
+                box.classList.remove('open');
+            };
+            menu.appendChild(btn);
+        });
+
+        // ── First-prompt injection — only offered where a prompt file exists ──
+        let refreshInj = () => {};
+        if (INJECTION_PROMPTS[P]) {
+            menu.appendChild(mkEl('div', { className: 'ai-export-menu-divider' }));
+            menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'First-prompt injection' }));
+
+            const injBtn = mkEl('button', { className: 'ai-export-menu-item' });
+            const updateInjBtn = () => {
+                const on = CFG.injection?.enabled && CFG.injection.sites?.[P];
+                const spent = (() => { try { return sessionStorage.getItem(INJECTED_KEY) === '1'; } catch(_) { return false; } })();
+                injBtn.innerHTML = `<span style="flex:1">${on ? 'Armed' : 'Disabled'}</span><span class="ai-export-badge">${on ? (spent ? 'SPENT' : 'READY') : 'OFF'}</span>`;
+            };
+            updateInjBtn();
+            refreshInj = updateInjBtn;
+            injBtn.onclick = e => {
+                e.stopPropagation();
+                const on = !(CFG.injection?.enabled && CFG.injection.sites?.[P]);
+                CFG.injection = { ...(CFG.injection || DEFAULTS.injection), enabled: on, sites: { ...(CFG.injection?.sites || {}), [P]: on } };
+                saveCfg(CFG); updateInjBtn(); updateCavemanPill();
+            };
+            menu.appendChild(injBtn);
+
+            const rearm = mkEl('button', { className: 'ai-export-menu-item' });
+            rearm.innerHTML = `<span style="flex:1">Re-arm for this tab</span>`;
+            rearm.onclick = e => {
+                e.stopPropagation();
+                try { sessionStorage.removeItem(INJECTED_KEY); } catch(_) {}
+                updateInjBtn();
+            };
+            menu.appendChild(rearm);
+        }
+
         box.appendChild(menu);
         document.body.appendChild(box);
         cavemanBox = box;
@@ -290,7 +421,8 @@
                 menu.className = 'ai-export-menu-panel';
                 menu.classList.add(isB ? isR ? 'pos-bottom-right':'pos-bottom-left' : isR ? 'pos-top-right':'pos-top-left');
                 menu.querySelectorAll('.cave-lvl-btn').forEach(b => b._refresh?.());
-                updateToggleBtn();
+                menu.querySelectorAll('.pony-lvl-btn').forEach(b => b._refresh?.());
+                updateToggleBtn(); updatePonyBtn(); refreshInj();
                 box.classList.add('open');
             } else {
                 box.classList.remove('open');
@@ -454,8 +586,6 @@
     }
     function sanitize(t) { return (t||document.title||"Export").trim().replace(/[\/\\\?\%\*\:\|"<>\.]/g,"_"); }
     function getTitle() {
-        if (P==="chatGPT")  return sanitize(qs("#history a[data-active]")?.textContent);
-        if (P==="gemini")   return sanitize(qs("conversations-list div.selected")?.textContent||document.title.replace(/ - Google Gemini$/,'').trim().slice(0,30));
         if (P==="deepseek") {
             const byZ=qsa('[style*="z-index"],div').find(el=>getComputedStyle(el).zIndex==="12");
             return sanitize(byZ?.textContent||qs('div[class*="chat-item--active"] span,li[class*="active"] .title,a[class*="active"] span')?.textContent);
@@ -467,8 +597,8 @@
     // ─── HTML → Markdown ─────────────────────────────────────────────────────────
     function toMd(html) {
         const doc=new DOMParser().parseFromString(html,"text/html");
-        const isGemini=P==="gemini",isChatGPT=P==="chatGPT",isClaude=P==="claude",isDS=P==="deepseek";
-        if(!isGemini) qsa("span.katex-html",doc).forEach(e=>e.remove());
+        const isClaude=P==="claude",isDS=P==="deepseek";
+        qsa("span.katex-html",doc).forEach(e=>e.remove());
         qsa("mrow",doc).forEach(e=>e.remove());
         qsa('annotation[encoding="application/x-tex"]',doc).forEach(e=>e.replaceWith(e.closest(".katex-display")?`\n$$\n${e.textContent.trim()}\n$$\n`:`$${e.textContent.trim()}$`));
         const rp=(el,txt)=>el.parentNode.replaceChild(document.createTextNode(txt),el);
@@ -477,9 +607,7 @@
         qsa("p code",doc).forEach(e=>rp(e,`\`${e.textContent}\``));
         qsa("a",doc).forEach(e=>rp(e,`[${e.textContent}](${e.href})`));
         qsa("img",doc).forEach(e=>rp(e,`![${e.alt}](${e.src})`));
-        if(isChatGPT){qsa("pre",doc).forEach(pre=>{const type=qs("div>div:first-child",pre)?.textContent||"";const code=qs("div>div:nth-child(3)>code",pre)?.textContent||pre.textContent;pre.innerHTML=`\n\`\`\`${type}\n${code}\n\`\`\`\n`;});}
-        else if(isGemini){qsa("code-block",doc).forEach(d=>{const type=qs("div>div>span",d)?.textContent||"";const code=qs("div>div:nth-child(2)>div>pre",d)?.textContent||d.textContent;d.innerHTML=`\n\`\`\`${type}\n${code}\n\`\`\`\n`;});}
-        else if(isClaude){qsa("pre",doc).forEach(pre=>{const code=qs("code",pre);const type=code?Array.from(code.classList).find(c=>c.startsWith("language-"))?.replace("language-","")||"":"";pre.innerHTML=`\n\`\`\`${type}\n${code?code.textContent:pre.textContent}\n\`\`\`\n`;});}
+        if(isClaude){qsa("pre",doc).forEach(pre=>{const code=qs("code",pre);const type=code?Array.from(code.classList).find(c=>c.startsWith("language-"))?.replace("language-","")||"":"";pre.innerHTML=`\n\`\`\`${type}\n${code?code.textContent:pre.textContent}\n\`\`\`\n`;});}
         else if(isDS){qsa("pre",doc).forEach(pre=>{const code=qs("code",pre);let type=code?Array.from(code.classList).find(c=>c.startsWith("language-"))?.replace("language-","")||"":"";if(!type)type=qs('span.code-lang,span[class*="lang"],div[class*="code-header"] span',pre.closest("div"))?.textContent.trim()||"";pre.innerHTML=`\n\`\`\`${type}\n${code?code.textContent:pre.textContent}\n\`\`\`\n`;});qsa('div[class*="think"],details.think,div.ds-think',doc).forEach(e=>rp(e,`\n> **[Thinking]**\n${e.textContent.trim().split("\n").map(l=>`> ${l}`).join("\n")}\n`));}
         qsa("ul",doc).forEach(ul=>rp(ul,"\n"+qsa(":scope>li",ul).map(li=>`- ${li.textContent.trim()}`).join("\n")));
         qsa("ol",doc).forEach(ol=>rp(ol,"\n"+qsa(":scope>li",ol).map((li,i)=>`${i+1}. ${li.textContent.trim()}`).join("\n")));
@@ -495,9 +623,7 @@
     // ─── getElements ─────────────────────────────────────────────────────────────
     function getElements(){
         const res=[];
-        if(P==="chatGPT")res.push(...qsa("article"));
-        else if(P==="gemini"){const q=qsa("user-query-content"),r=qsa("model-response");q.forEach((x,i)=>{res.push(x);if(r[i])res.push(r[i]);});}
-        else if(P==="claude")res.push(...qsa('[data-testid="user-message"],.font-claude-response'));
+        if(P==="claude")res.push(...qsa('[data-testid="user-message"],.font-claude-response'));
         else if(P==="brave"){
             // Brave /ask: messages in document order — div.message.user then 1-3
             // div.message.assistant.llm-output (selector skips div.message.augment = web results,
@@ -523,7 +649,7 @@
             if(fmt==="json"){c=JSON.stringify(pl,null,2);m="application/json";}
             else if(fmt==="csv"){c="Q,A\n"+pl.map(p=>`"${p.q.replace(/"/g,'""')}","${p.a.replace(/"/g,'""')}"`).join("\n");m="text/csv";}
             else if(fmt==="html"){c=`<html><body style="font-family:sans-serif;max-width:800px;margin:auto;padding:30px;line-height:1.7;">${pl.map(p=>`<div style="background:#f4f4f5;padding:15px;border-radius:12px;margin:20px 0;"><b>Q:</b> ${p.q}</div><div><b>A:</b> ${p.a}</div><hr/>`).join("")}</body></html>`;m="text/html";}
-            else if(fmt==="md"){c=pl.map(p=>`\n# Q:\n${p.q}\n\n# A:\n${p.a}\n\n---\n`).join("");m="text/markdown";}
+            else if(fmt==="md"){c=mdDoc(title,pl);m="text/markdown";}
             else{c=pl.map(p=>`\nQ:\n${p.q}\n\nA:\n${p.a}\n\n---\n`).join("");}
         } else {
             const res=getElements();if(!res.length)return;
@@ -532,7 +658,15 @@
             if(fmt==="json"){c=JSON.stringify(res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a.push({q:md(x),a:md(res[i+1])});return a;},[]),null,2);m="application/json";}
             else if(fmt==="csv"){c="Q,A\n"+res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`"${md(x).replace(/"/g,'""')}","${md(res[i+1]).replace(/"/g,'""')}"\n`;return a;},"");m="text/csv";}
             else if(fmt==="html"){c=`<html><body style="font-family:sans-serif;max-width:800px;margin:auto;padding:30px;line-height:1.7;">${res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`<div style="background:#f4f4f5;padding:15px;border-radius:12px;margin:20px 0;"><b>Q:</b> ${x.innerHTML}</div><div><b>A:</b> ${res[i+1].innerHTML}</div><hr/>`;return a;},"")}</body></html>`;m="text/html";}
-            else if(fmt==="md"){c=res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`\n# Q:\n${md(x)}\n\n# A:\n${md(res[i+1])}\n\n---\n`;return a;},"");m="text/markdown";}
+            else if(fmt==="md"){
+                const pairs=[];
+                for(let i=0;i<res.length-1;i+=2){
+                    if(!res[i+1])break;
+                    const att=extractAttachments(res[i]);
+                    pairs.push({q:md(res[i])+(att.length?renderAttachmentsMd(att):''),a:md(res[i+1])});
+                }
+                c=mdDoc(title,pairs);m="text/markdown";
+            }
             else{c=res.reduce((a,x,i)=>{if(i%2===0&&res[i+1])a+=`\nQ:\n${txt(x)}\n\nA:\n${txt(res[i+1])}\n\n---\n`;return a;},"");}
         }
         anchorSave(c.replace(/&amp;/g,"&"),m,`${fname}.${fmt}`);
@@ -546,66 +680,18 @@
         setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(u);},0);
     }
 
-    // Download into a sub-folder of the browser's download folder. Only the
-    // userscript manager's download API can do this, so fall back to a flat
-    // download when it is unavailable or rejects the path.
-    function saveToSubPath(text,mime,relPath,flatName){
-        if(typeof GM_download!=="function"){anchorSave(text,mime,flatName);return;}
-        const bytes=new TextEncoder().encode(text);
-        let bin="";for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
-        GM_download({
-            url:`data:${mime};base64,${btoa(bin)}`,
-            name:relPath,
-            onerror:()=>anchorSave(text,mime,flatName),
-            ontimeout:()=>anchorSave(text,mime,flatName),
-        });
-    }
-
-    // ─── Obsidian export ──────────────────────────────────────────────────────────
-    // Writes the note straight into the vault via the browser's download folder:
-    // <download folder>/<obsFolder>/<platform>/<name>.md
-    async function obsidianExport(){
-        let pairs_data=[], title, pairCount;
-
-        if(P==="deepseek"){
-            const items=await getDeepSeekContents();
-            if(!items.length){alert("No conversation found!");return;}
-            title=getTitle();
-            pairs_data=groupDeepSeekPairs(items);
-            pairCount=pairs_data.length;
-        } else {
-            const res=getElements();
-            if(!res.length){alert("No conversation found!");return;}
-            title=getTitle();
-            pairCount=Math.floor(res.length/2);
-            for(let i=0;i<res.length-1;i+=2){
-                if(!res[i+1]) break;
-                const att=extractAttachments(res[i]);
-                const qText=toMd(res[i].innerHTML)+(att.length?renderAttachmentsMd(att):'');
-                const aText=toMd(res[i+1].innerHTML);
-                pairs_data.push({q:qText,a:aText});
-            }
-        }
-
-        if(!pairs_data.length){alert("No conversation found!");return;}
-
-        // Clean minimal Obsidian body — no emoji headers, just Q/A blocks with dividers
-        let body='';
-        pairs_data.forEach((p,i)=>{
-            body += `## User\n\n${p.q.trim()}\n\n## Assistant\n\n${p.a.trim()}\n\n---\n\n`;
-        });
-
-        const fname=makeFilename(title,pairCount);
+    // Markdown export: frontmatter + one ## User / ## Assistant block per turn.
+    // Drops straight into a note-taking vault; where the file goes is the browser's
+    // business, and the browser already remembers the last folder you chose.
+    function mdDoc(title,pairs){
         const yaml=["---",
             `title: "${title}"`,
             `date: "${new Date().toISOString()}"`,
             `source: ${P}`,
             `url: "${document.URL}"`,
-            `turns: ${pairCount}`,
+            `turns: ${pairs.length}`,
             "---","",""].join("\n");
-
-        const relPath=`${CFG.obsFolder.replace(/^\/+|\/+$/g,"")}/${P}/${fname}.md`;
-        saveToSubPath(yaml+body.replace(/&amp;/g,"&"),"text/markdown",relPath,`${fname}.md`);
+        return yaml+pairs.map(p=>`## User\n\n${p.q.trim()}\n\n## Assistant\n\n${p.a.trim()}\n\n---\n\n`).join("");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -614,12 +700,9 @@
     function getEventTarget(e){return e.composedPath?e.composedPath()[0]||e.target:e.target;}
     function isComposing(e){return e.isComposing||e.keyCode===229;}
     function isEditableTarget(t){return /INPUT|TEXTAREA|SELECT/.test(t.tagName)||(t.getAttribute&&t.getAttribute("contenteditable")==="true");}
-    function isChatGPTTarget(t){return t.id==="prompt-textarea"||t.closest("#prompt-textarea")||(t.getAttribute&&t.getAttribute("contenteditable")==="true");}
     function isSendShortcut(e){if(e.key!=="Enter")return false;const sc=CFG.shortcuts;return(sc.ctrl&&e.ctrlKey&&!e.altKey&&!e.metaKey)||(sc.alt&&e.altKey&&!e.ctrlKey&&!e.metaKey)||(sc.meta&&e.metaKey&&!e.ctrlKey&&!e.altKey);}
     function isPotentialSend(e){if(e.key!=="Enter")return false;return(e.ctrlKey&&!e.altKey&&!e.metaKey&&!e.shiftKey)||(e.altKey&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey)||(e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.shiftKey);}
     function findSubmit(){
-        if(P==="chatGPT")return qs('button[data-testid="send-button"]');
-        if(P==="gemini") return qs('button[aria-label*="Send"],button[aria-label*="发送"],button[aria-label*="傳送"]');
         if(P==="deepseek"){const bc=qs(".bf38813a");if(!bc)return null;const btns=qsa('div[role="button"].ds-button',bc);for(let i=btns.length-1;i>=0;i--){const b=btns[i];if(!b.classList.contains('ds-button--disabled'))return b;}return null;}
         if(P==="claude") return qs('button[aria-label*="Send"]');
         if(P==="brave"){const scope=qs('form')||document;return qs('button[type="submit"]:not([disabled])',scope)||qs('button[aria-label*="Ask" i]',scope)||qs('button[aria-label*="Send" i]',scope)||qs('button[type="submit"]',scope);}
@@ -627,12 +710,6 @@
     }
     window.addEventListener("keydown",e=>{
         if(isComposing(e))return;const t=getEventTarget(e);
-        if(P==="chatGPT"){
-            if(e.key==="Enter"&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey&&!e.altKey&&isChatGPTTarget(t)){e.stopPropagation();e.preventDefault();const ev=new KeyboardEvent("keydown",{key:"Enter",code:"Enter",shiftKey:true,bubbles:true,cancelable:true});t.dispatchEvent(ev);if(!ev.defaultPrevented)document.execCommand("insertParagraph");return;}
-            if(isSendShortcut(e)&&isChatGPTTarget(t)){const sb=findSubmit();if(sb&&!sb.disabled){e.preventDefault();e.stopPropagation();clickSendWithCaveman();}return;}
-            if(isPotentialSend(e)&&isChatGPTTarget(t)){e.preventDefault();e.stopPropagation();}
-            return;
-        }
         if(e.key==="Enter"&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey&&!e.altKey&&isEditableTarget(t)){
             e.preventDefault();e.stopPropagation();
             if(t.tagName==="TEXTAREA"){const s=t.selectionStart,v=t.value;t.value=v.substring(0,s)+"\n"+v.substring(t.selectionEnd);t.selectionStart=t.selectionEnd=s+1;t.dispatchEvent(new Event("input",{bubbles:true}));}
@@ -643,7 +720,7 @@
         if(isPotentialSend(e)&&isEditableTarget(t)){e.stopPropagation();}
     },true);
     window.addEventListener("keypress",e=>{
-        if(P==="chatGPT"||isComposing(e))return;
+        if(isComposing(e))return;
         if(e.key==="Enter"&&!e.ctrlKey&&!e.shiftKey&&!e.metaKey&&!e.altKey){const t=getEventTarget(e);if(isEditableTarget(t))e.stopPropagation();}
         if(isPotentialSend(e)){const t=getEventTarget(e);if(isEditableTarget(t))e.stopPropagation();}
     },true);
@@ -792,19 +869,19 @@
 
         const section=t=>{const d=document.createElement('div');Object.assign(d.style,{fontSize:'10px',fontWeight:'700',letterSpacing:'0.1em',textTransform:'uppercase',color:fg2,padding:'18px 0 6px'});d.textContent=t;return d;};
 
-        const textInput=(val,onInput)=>{
-            const inp=document.createElement('input');inp.value=val;
-            Object.assign(inp.style,{background:bg3,border:`1px solid rgba(255,255,255,0.1)`,borderRadius:'6px',color:fg,padding:'5px 9px',fontSize:'12px',width:'100%',boxSizing:'border-box',textAlign:'left',outline:'none'});
-            inp.addEventListener('focus',()=>{inp.style.borderColor='rgba(255,255,255,0.25)';});
-            inp.addEventListener('blur',()=>{inp.style.borderColor='rgba(255,255,255,0.1)';});
-            inp.oninput=()=>onInput(inp.value);return inp;
+        const levelSel=(val,onChange)=>{
+            const sel=document.createElement('select');
+            Object.assign(sel.style,{background:bg3,border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:fg,padding:'4px 8px',fontSize:'12px',outline:'none'});
+            ['lite','full','ultra'].forEach(l=>{const o=document.createElement('option');o.value=l;o.textContent=l.charAt(0).toUpperCase()+l.slice(1);if(val===l)o.selected=true;sel.appendChild(o);});
+            sel.onchange=()=>onChange(sel.value);
+            return sel;
         };
 
         // Header
         const hdr=document.createElement('div');Object.assign(hdr.style,{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'2px'});
         const htitle=document.createElement('div');Object.assign(htitle.style,{display:'flex',alignItems:'baseline',gap:'8px'});
         const hname=document.createElement('span');hname.textContent='lance';Object.assign(hname.style,{fontSize:'17px',fontWeight:'700',color:wht});
-        const hver=document.createElement('span');hver.textContent='v0.2.1';Object.assign(hver.style,{fontSize:'10px',color:fg2});
+        const hver=document.createElement('span');hver.textContent='v'+(typeof GM_info!=='undefined'?GM_info.script.version:'?');Object.assign(hver.style,{fontSize:'10px',color:fg2});
         htitle.appendChild(hname);htitle.appendChild(hver);
         const closeBtn=document.createElement('button');closeBtn.textContent='✕';Object.assign(closeBtn.style,{background:'none',border:'none',color:fg2,cursor:'pointer',fontSize:'16px',padding:'0',lineHeight:'1',transition:'color 0.1s'});
         closeBtn.addEventListener('mouseenter',()=>{closeBtn.style.color=wht;});closeBtn.addEventListener('mouseleave',()=>{closeBtn.style.color=fg2;});
@@ -814,7 +891,7 @@
 
         // ── Sites — collapsible dropdown ──
         dlg.appendChild(section('Export button — sites'));
-        const SITE_LABELS={chatGPT:'ChatGPT',gemini:'Gemini',claude:'Claude',deepseek:'DeepSeek',brave:'Brave'};
+        const SITE_LABELS={claude:'Claude',deepseek:'DeepSeek',brave:'Brave'};
 
         // Dropdown toggle button
         const sitesDropBtn=document.createElement('button');
@@ -847,26 +924,26 @@
             dlg.appendChild(rowEl(label,toggle(CFG.shortcuts[key]??DEFAULTS.shortcuts[key],v=>{CFG.shortcuts[key]=v;saveCfg(CFG);})));
         });
 
-        // ── Obsidian ──
-        dlg.appendChild(section('Obsidian'));
-
-        const folderWrap=document.createElement('div');Object.assign(folderWrap.style,{padding:'9px 0',borderBottom:`1px solid ${bd}`});
-        const folderLbl=document.createElement('div');folderLbl.textContent='Vault folder (under the browser download folder)';Object.assign(folderLbl.style,{marginBottom:'6px',color:fg,fontSize:'12px'});
-        const folderHint=document.createElement('div');folderHint.textContent=`Saves to ${CFG.obsFolder}/${P}/`;Object.assign(folderHint.style,{marginTop:'6px',color:fg2,fontSize:'10px'});
-        folderWrap.appendChild(folderLbl);
-        folderWrap.appendChild(textInput(CFG.obsFolder,v=>{CFG.obsFolder=v.trim().replace(/^\/+|\/+$/g,"")||"chats";saveCfg(CFG);folderHint.textContent=`Saves to ${CFG.obsFolder}/${P}/`;}));
-        folderWrap.appendChild(folderHint);
-        dlg.appendChild(folderWrap);
-
         // ── Caveman ──
         dlg.appendChild(section('Caveman mode'));
         dlg.appendChild(rowEl('Enable',toggle(CFG.caveman?.enabled??false,v=>{if(!CFG.caveman)CFG.caveman={enabled:false,level:'ultra'};CFG.caveman.enabled=v;saveCfg(CFG);updateCavemanPill();})));
-        const lvlRow=document.createElement('div');Object.assign(lvlRow.style,{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:`1px solid ${bd}`});
-        const lvlLbl=document.createElement('span');lvlLbl.textContent='Level';lvlLbl.style.color=fg;
-        const lvlSel=document.createElement('select');Object.assign(lvlSel.style,{background:bg3,border:'1px solid rgba(255,255,255,0.1)',borderRadius:'6px',color:fg,padding:'4px 8px',fontSize:'12px',outline:'none'});
-        ['lite','full','ultra'].forEach(l=>{const opt=document.createElement('option');opt.value=l;opt.textContent=l.charAt(0).toUpperCase()+l.slice(1);if((CFG.caveman?.level||'ultra')===l)opt.selected=true;lvlSel.appendChild(opt);});
-        lvlSel.onchange=()=>{if(!CFG.caveman)CFG.caveman={enabled:false,level:'ultra'};CFG.caveman.level=lvlSel.value;saveCfg(CFG);updateCavemanPill();};
-        lvlRow.appendChild(lvlLbl);lvlRow.appendChild(lvlSel);dlg.appendChild(lvlRow);
+        dlg.appendChild(rowEl('Level',levelSel(CFG.caveman?.level||'ultra',v=>{CFG.caveman={...(CFG.caveman||DEFAULTS.caveman),level:v};saveCfg(CFG);updateCavemanPill();})));
+
+        // ── Ponytail ──
+        dlg.appendChild(section('Ponytail mode — code answers'));
+        dlg.appendChild(rowEl('Enable',toggle(CFG.ponytail?.enabled??false,v=>{CFG.ponytail={...(CFG.ponytail||DEFAULTS.ponytail),enabled:v};saveCfg(CFG);updateCavemanPill();})));
+        dlg.appendChild(rowEl('Level',levelSel(CFG.ponytail?.level||'full',v=>{CFG.ponytail={...(CFG.ponytail||DEFAULTS.ponytail),level:v};saveCfg(CFG);})));
+
+        // ── First-prompt injection ──
+        dlg.appendChild(section('First-prompt injection'));
+        dlg.appendChild(rowEl('Enable',toggle(CFG.injection?.enabled??false,v=>{CFG.injection={...(CFG.injection||DEFAULTS.injection),enabled:v};saveCfg(CFG);updateCavemanPill();})));
+        Object.keys(INJECTION_PROMPTS).forEach(site=>{
+            dlg.appendChild(rowEl(SITE_LABELS[site]||site,toggle(CFG.injection?.sites?.[site]??false,v=>{
+                CFG.injection={...(CFG.injection||DEFAULTS.injection),sites:{...(CFG.injection?.sites||{}),[site]:v}};saveCfg(CFG);
+            })));
+        });
+        const injNote=document.createElement('div');injNote.textContent='Fires once per tab, on the first message you send. Text lives in injection/<site>.md.';
+        Object.assign(injNote.style,{fontSize:'10px',color:fg2,padding:'6px 0 0'});dlg.appendChild(injNote);
 
         // ── Claude Usage Tracker (only shown on claude.ai) ──
         if (P === 'claude') {
@@ -886,6 +963,7 @@
         .ai-export-drag-box{position:fixed;z-index:2147483646;display:flex;align-items:center;justify-content:center;height:42px;min-width:42px;padding:0;background:rgba(24,24,27,0.9);backdrop-filter:blur(14px);color:rgba(255,255,255,0.85);border-radius:100px;box-shadow:0 4px 24px rgba(0,0,0,0.4),0 0 0 1px rgba(255,255,255,0.07);cursor:move;user-select:none;font-family:system-ui;font-size:13px;font-weight:600;transition:transform 0.15s,box-shadow 0.15s;white-space:nowrap;}
         .ai-export-drag-box:hover{transform:scale(1.04);color:#fff;box-shadow:0 6px 30px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.12);}
         .lance-pill-inner{display:flex;align-items:center;justify-content:center;pointer-events:none;padding:0 14px;}
+        .lance-pill-icon{width:14px;height:14px;flex-shrink:0;text-align:center;line-height:14px;}
         .lance-pill-text{box-sizing:border-box;max-width:0;padding-left:0;opacity:0;overflow:hidden;transition:max-width .22s cubic-bezier(.16,1,.3,1),padding-left .22s cubic-bezier(.16,1,.3,1),opacity .15s;}
         .ai-export-drag-box.open .lance-pill-text{max-width:140px;padding-left:7px;opacity:1;}
         .ai-export-menu-panel{position:absolute;width:max-content;min-width:185px;background:#18181b;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:4px;display:none;flex-direction:column;gap:1px;box-shadow:0 12px 40px rgba(0,0,0,0.6);}
@@ -911,29 +989,26 @@
 
         const box=mkEl("div",{className:"ai-export-drag-box"});
         box.id='lance-export-box';
-        box.innerHTML=`<div class="lance-pill-inner"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg><span class="lance-pill-text">Export</span></div>`;
+        box.innerHTML=`<div class="lance-pill-inner">${LANCE_ICON}<span class="lance-pill-text">Export</span></div>`;
 
         const menu=mkEl("div",{className:"ai-export-menu-panel"});
         const addLabel=t=>menu.appendChild(Object.assign(document.createElement('div'),{className:'ai-export-section-label',textContent:t}));
         const addDiv=()=>menu.appendChild(mkEl("div",{className:"ai-export-menu-divider"}));
-        const addBtn=(icon,label,badge,fn)=>{
+        const addBtn=(label,badge,fn)=>{
             const btn=mkEl("button",{className:'ai-export-menu-item'});
-            btn.innerHTML=`<span style="font-family:monospace;font-size:10px;width:16px;text-align:center;opacity:.45;flex-shrink:0">${icon}</span><span style="margin-left:4px">${label}</span><span class="ai-export-badge">${badge}</span>`;
+            btn.innerHTML=`<span>${label}</span><span class="ai-export-badge">${badge}</span>`;
             btn.onclick=e=>{e.stopPropagation();btn.classList.add('clicked');setTimeout(()=>{btn.classList.remove('clicked');box.classList.remove('open');fn();},160);};
             menu.appendChild(btn);
         };
 
         addLabel("Download");
-        addBtn('#','Markdown','.MD',()=>fileExport('md'));
-        addBtn('{}','JSON','.JSON',()=>fileExport('json'));
-        addBtn(',','CSV','.CSV',()=>fileExport('csv'));
-        addBtn('T','Plain text','.TXT',()=>fileExport('txt'));
-        addBtn('<>','HTML','.HTML',()=>fileExport('html'));
+        addBtn('Markdown','.MD',()=>fileExport('md'));
+        addBtn('JSON','.JSON',()=>fileExport('json'));
+        addBtn('CSV','.CSV',()=>fileExport('csv'));
+        addBtn('Plain text','.TXT',()=>fileExport('txt'));
+        addBtn('HTML','.HTML',()=>fileExport('html'));
         addDiv();
-        addLabel("Integrations");
-        addBtn('◆','Obsidian','.MD',()=>obsidianExport());
-        addDiv();
-        addBtn('⚙','Settings','',()=>openDashboard());
+        addBtn('Settings','',()=>openDashboard());
 
         box.appendChild(menu);document.body.appendChild(box);
 
@@ -957,7 +1032,7 @@
         document.addEventListener("click",e=>{if(!box.contains(e.target))box.classList.remove('open');});
     }
 
-    GM_registerMenuCommand("⚙ Settings",openDashboard);
+    GM_registerMenuCommand("Settings",openDashboard);
 
     if(typeof trustedTypes!=="undefined"&&trustedTypes.defaultPolicy===null)
         trustedTypes.createPolicy("default",{createHTML:s=>s,createScriptURL:s=>s,createScript:s=>s});
