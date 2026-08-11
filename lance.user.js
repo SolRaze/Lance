@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lance
 // @namespace    https://github.com/SolRaze/lance
-// @version      0.4.0
+// @version      0.4.1
 // @description  Chat exporter — Markdown/JSON/CSV/TXT/HTML, Enter-as-newline, Caveman + Ponytail prompt modes, first-prompt injection, Claude usage tracker
 // @author       SolRaze
 // @homepageURL  https://github.com/SolRaze/lance
@@ -51,6 +51,8 @@
     const DEFAULTS = {
         sites:         { claude: true, deepseek: true, brave: true },
         shortcuts:     { ctrl: true, meta: true, alt: false },
+        dockTopRight:  false,  // park the pills top-right instead of free-floating
+        pills:         { export: true, caveman: true, ponytail: true, injection: true },
         caveman:       { enabled: false, level: 'ultra' },
         ponytail:      { enabled: false, level: 'full' },
         // First-prompt injection: fires once per chat tab, per enabled site.
@@ -253,196 +255,234 @@
         requestAnimationFrame(fire);
     }
 
-    // ── Caveman button ────────────────────────────────────────────────────────
-    let cavemanBox = null;
+    // ── Pills ─────────────────────────────────────────────────────────────────
+    // Four independent buttons — export, caveman, ponytail, injection — sharing one
+    // shell. Each carries its own mark, menu, saved position and visibility toggle.
+    const PILL_ORDER = ['export', 'caveman', 'ponytail', 'injection'];
+    const PILL_POS   = { export:['x','y'], caveman:['cx','cy'], ponytail:['px','py'], injection:['ix','iy'] };
+    const pills = {};
 
-    function updateCavemanPill() {
-        if (!cavemanBox) return;
-        const on  = CFG.caveman?.enabled;
-        const lvl = (CFG.caveman?.level || 'ultra').toUpperCase();
-        // Any prompt mode being armed lights the pill — otherwise ponytail or a pending
-        // injection would fire with nothing on screen saying so.
-        const armed = on || CFG.ponytail?.enabled || (CFG.injection?.enabled && CFG.injection.sites?.[P]);
-        const label = cavemanBox.querySelector('#lance-cave-label');
-        const icon  = cavemanBox.querySelector('#lance-cave-icon');
-        if (label) label.textContent = on ? lvl : (CFG.ponytail?.enabled ? 'PONY' : 'CAVE');
-        if (icon)  icon.textContent  = on ? lvl[0] : (CFG.ponytail?.enabled ? 'P' : 'C');
-        cavemanBox.style.background = armed ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,27,0.9)';
-        cavemanBox.style.color      = armed ? '#111' : 'rgba(255,255,255,0.85)';
-        cavemanBox.style.boxShadow  = armed
-            ? '0 4px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.2)'
-            : '0 4px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.07)';
+    // Available = this site supports it at all. Visible = available and not hidden.
+    function pillAvailable(key) {
+        if (key === 'export')    return CFG.sites[P] !== false;
+        if (P === 'brave')       return false;                  // prompt modes are chat-only
+        if (key === 'injection') return !!INJECTION_PROMPTS[P];
+        return true;
+    }
+    function pillVisible(key) { return pillAvailable(key) && (CFG.pills?.[key] ?? true); }
+
+    function injArmed() { return !!(CFG.injection?.enabled && CFG.injection.sites?.[P]); }
+    function injSpent() { try { return sessionStorage.getItem(INJECTED_KEY) === '1'; } catch(_) { return false; } }
+    function anyModeArmed() { return !!CFG.caveman?.enabled || !!CFG.ponytail?.enabled || (injArmed() && !injSpent()); }
+
+    const PILL_STATE = {
+        export:    () => ({ mark:'',  label:'Export', armed:false }),
+        caveman:   () => { const on=!!CFG.caveman?.enabled,  l=(CFG.caveman?.level ||'ultra').toUpperCase();
+                           return { mark:on?l[0]:'C', label:on?l:'CAVE', armed:on }; },
+        ponytail:  () => { const on=!!CFG.ponytail?.enabled, l=(CFG.ponytail?.level||'full').toUpperCase();
+                           return { mark:on?l[0]:'P', label:on?l:'PONY', armed:on }; },
+        injection: () => ({ mark:'I', label: injArmed() ? (injSpent()?'SPENT':'READY') : 'INJECT',
+                            armed: injArmed() && !injSpent() }),
+    };
+
+    function refreshPills() {
+        PILL_ORDER.forEach(key => {
+            const p = pills[key];
+            if (!p) return;
+            p.box.style.display = pillVisible(key) ? '' : 'none';
+            const s = PILL_STATE[key]();
+            const mark = p.box.querySelector('.lance-pill-mark');
+            const text = p.box.querySelector('.lance-pill-text');
+            if (mark) mark.textContent = s.mark;
+            if (text) text.textContent = s.label;
+            p.box.style.background = s.armed ? 'rgba(255,255,255,0.92)' : 'rgba(24,24,27,0.9)';
+            p.box.style.color      = s.armed ? '#111' : 'rgba(255,255,255,0.85)';
+            p.box.style.boxShadow  = s.armed
+                ? '0 4px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.2)'
+                : '0 4px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.07)';
+            p.sync?.();
+        });
     }
 
-    function initCavemanPill() {
-        if (P==="brave") return;   // Brave: no prompt-mode pill (keyboard + export still on)
-        if (qs('#lance-cave-box')) { updateCavemanPill(); return; }
-
-        const box = mkEl('div', { className: 'ai-export-drag-box' });
-        box.id = 'lance-cave-box';
-        // Collapsed, this pill has to say something the export pill doesn't: the mark is
-        // the active level's initial, so state reads without opening the menu.
-        box.innerHTML = `<div class="lance-pill-inner"><span id="lance-cave-icon" class="lance-pill-icon" style="font-size:13px;font-weight:700">C</span><span id="lance-cave-label" class="lance-pill-text" style="font-size:13px;font-weight:700;letter-spacing:0.05em">CAVE</span></div>`;
-
-        const menu = mkEl('div', { className: 'ai-export-menu-panel' });
-
-        menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'Caveman Mode' }));
-
-        const toggleBtn = mkEl('button', { className: 'ai-export-menu-item' });
-        const updateToggleBtn = () => {
-            const on = CFG.caveman?.enabled;
-            toggleBtn.innerHTML = `<span style="flex:1">${on ? 'Enabled' : 'Disabled'}</span><span class="ai-export-badge">${on ? 'ON' : 'OFF'}</span>`;
-        };
-        updateToggleBtn();
-        toggleBtn.onclick = e => {
-            e.stopPropagation();
-            if (!CFG.caveman) CFG.caveman = { enabled: false, level: 'ultra' };
-            CFG.caveman.enabled = !CFG.caveman.enabled;
-            saveCfg(CFG); updateCavemanPill(); updateToggleBtn();
-        };
-        menu.appendChild(toggleBtn);
-
-        menu.appendChild(mkEl('div', { className: 'ai-export-menu-divider' }));
-        menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'Level' }));
-
-        [['lite','Lite','Tight prose, no filler'],['full','Full','Terse, fragments OK'],['ultra','Ultra','Max compression']].forEach(([val,name,desc]) => {
-            const btn = mkEl('button', { className: 'ai-export-menu-item cave-lvl-btn' });
-            const refresh = () => {
-                const active = (CFG.caveman?.level || 'ultra') === val;
-                btn.innerHTML = `<span style="flex:1">${name}<span style="display:block;font-size:10px;opacity:0.45;font-weight:400">${desc}</span></span><span class="ai-export-badge">${active ? '●' : ''}</span>`;
-                btn.style.color = active ? '#fff' : '';
-            };
-            refresh(); btn._refresh = refresh;
-            btn.onclick = e => {
-                e.stopPropagation();
-                if (!CFG.caveman) CFG.caveman = { enabled: false, level: 'ultra' };
-                CFG.caveman.level = val;
-                saveCfg(CFG); updateCavemanPill();
-                menu.querySelectorAll('.cave-lvl-btn').forEach(b => b._refresh?.());
-                box.classList.remove('open');
-            };
-            menu.appendChild(btn);
-        });
-
-        // ── Ponytail — same shape as caveman, governs code instead of prose ──
-        menu.appendChild(mkEl('div', { className: 'ai-export-menu-divider' }));
-        menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'Ponytail (code)' }));
-
-        const ponyBtn = mkEl('button', { className: 'ai-export-menu-item' });
-        const updatePonyBtn = () => {
-            const on = CFG.ponytail?.enabled;
-            ponyBtn.innerHTML = `<span style="flex:1">${on ? 'Enabled' : 'Disabled'}</span><span class="ai-export-badge">${on ? (CFG.ponytail.level||'full').toUpperCase() : 'OFF'}</span>`;
-        };
-        updatePonyBtn();
-        ponyBtn.onclick = e => {
-            e.stopPropagation();
-            CFG.ponytail = { ...(CFG.ponytail || DEFAULTS.ponytail), enabled: !CFG.ponytail?.enabled };
-            saveCfg(CFG); updatePonyBtn(); updateCavemanPill();
-        };
-        menu.appendChild(ponyBtn);
-
-        [['lite','Lite','Simplest thing that works'],['full','Full','Lazy senior dev'],['ultra','Ultra','YAGNI extremist']].forEach(([val,name,desc]) => {
-            const btn = mkEl('button', { className: 'ai-export-menu-item pony-lvl-btn' });
-            const refresh = () => {
-                const active = (CFG.ponytail?.level || 'full') === val;
-                btn.innerHTML = `<span style="flex:1">${name}<span style="display:block;font-size:10px;opacity:0.45;font-weight:400">${desc}</span></span><span class="ai-export-badge">${active ? '●' : ''}</span>`;
-                btn.style.color = active ? '#fff' : '';
-            };
-            refresh(); btn._refresh = refresh;
-            btn.onclick = e => {
-                e.stopPropagation();
-                CFG.ponytail = { ...(CFG.ponytail || DEFAULTS.ponytail), level: val };
-                saveCfg(CFG); updatePonyBtn(); updateCavemanPill();
-                menu.querySelectorAll('.pony-lvl-btn').forEach(b => b._refresh?.());
-                box.classList.remove('open');
-            };
-            menu.appendChild(btn);
-        });
-
-        // ── First-prompt injection — only offered where a prompt file exists ──
-        let refreshInj = () => {};
-        if (INJECTION_PROMPTS[P]) {
-            menu.appendChild(mkEl('div', { className: 'ai-export-menu-divider' }));
-            menu.appendChild(mkEl('div', { className: 'ai-export-section-label', text: 'First-prompt injection' }));
-
-            const injBtn = mkEl('button', { className: 'ai-export-menu-item' });
-            const updateInjBtn = () => {
-                const on = CFG.injection?.enabled && CFG.injection.sites?.[P];
-                const spent = (() => { try { return sessionStorage.getItem(INJECTED_KEY) === '1'; } catch(_) { return false; } })();
-                injBtn.innerHTML = `<span style="flex:1">${on ? 'Armed' : 'Disabled'}</span><span class="ai-export-badge">${on ? (spent ? 'SPENT' : 'READY') : 'OFF'}</span>`;
-            };
-            updateInjBtn();
-            refreshInj = updateInjBtn;
-            injBtn.onclick = e => {
-                e.stopPropagation();
-                const on = !(CFG.injection?.enabled && CFG.injection.sites?.[P]);
-                CFG.injection = { ...(CFG.injection || DEFAULTS.injection), enabled: on, sites: { ...(CFG.injection?.sites || {}), [P]: on } };
-                saveCfg(CFG); updateInjBtn(); updateCavemanPill();
-            };
-            menu.appendChild(injBtn);
-
-            const rearm = mkEl('button', { className: 'ai-export-menu-item' });
-            rearm.innerHTML = `<span style="flex:1">Re-arm for this tab</span>`;
-            rearm.onclick = e => {
-                e.stopPropagation();
-                try { sessionStorage.removeItem(INJECTED_KEY); } catch(_) {}
-                updateInjBtn();
-            };
-            menu.appendChild(rearm);
+    // Docked, every pill sits in one fixed row at top-right, square like the site's own
+    // header buttons. Free, each returns to body at its own saved coordinates.
+    function applyDock() {
+        const boxes = PILL_ORDER.map(k => pills[k]?.box).filter(Boolean);
+        if (!boxes.length) return;
+        let dock = qs('#lance-dock');
+        if (CFG.dockTopRight) {
+            if (!dock) { dock = mkEl('div'); dock.id = 'lance-dock'; document.body.appendChild(dock); }
+            boxes.forEach(b => {
+                if (b.parentNode !== dock) dock.appendChild(b);
+                b.style.left = ''; b.style.top = '';
+            });
+        } else {
+            boxes.forEach((b, i) => {
+                if (dock && b.parentNode === dock) document.body.appendChild(b);
+                const [kx, ky] = PILL_POS[PILL_ORDER[i]];
+                const x = GM_getValue(kx, window.innerWidth  - 160);
+                const y = GM_getValue(ky, window.innerHeight - 100 + i * 46);
+                b.style.left = Math.max(0, Math.min(x, window.innerWidth  - 120)) + 'px';
+                b.style.top  = Math.max(0, Math.min(y, window.innerHeight -  60)) + 'px';
+            });
+            dock?.remove();
         }
+    }
 
+    // Enable row plus a level list. Caveman and ponytail differ only in config key and
+    // copy, so they share this; the returned closure re-renders the menu from config.
+    function modeMenu(cfgKey, title, levels) {
+        return (menu, box) => {
+            menu.appendChild(mkEl('div', { className:'ai-export-section-label', text:title }));
+            const onBtn = mkEl('button', { className:'ai-export-menu-item' });
+            onBtn.onclick = e => {
+                e.stopPropagation();
+                CFG[cfgKey] = { ...(CFG[cfgKey] || DEFAULTS[cfgKey]), enabled: !CFG[cfgKey]?.enabled };
+                saveCfg(CFG); refreshPills();
+            };
+            menu.appendChild(onBtn);
+            menu.appendChild(mkEl('div', { className:'ai-export-menu-divider' }));
+            menu.appendChild(mkEl('div', { className:'ai-export-section-label', text:'Level' }));
+            const btns = levels.map(([val, name, desc]) => {
+                const b = mkEl('button', { className:'ai-export-menu-item' });
+                b._val = val; b._name = name; b._desc = desc;
+                b.onclick = e => {
+                    e.stopPropagation();
+                    CFG[cfgKey] = { ...(CFG[cfgKey] || DEFAULTS[cfgKey]), level: val };
+                    saveCfg(CFG); refreshPills(); box.classList.remove('open');
+                };
+                menu.appendChild(b);
+                return b;
+            });
+            return () => {
+                const on = !!CFG[cfgKey]?.enabled, lvl = CFG[cfgKey]?.level || DEFAULTS[cfgKey].level;
+                onBtn.innerHTML = `<span style="flex:1">${on?'Enabled':'Disabled'}</span><span class="ai-export-badge">${on?'ON':'OFF'}</span>`;
+                btns.forEach(b => {
+                    const active = b._val === lvl;
+                    b.innerHTML = `<span style="flex:1">${b._name}<span style="display:block;font-size:10px;opacity:0.45;font-weight:400">${b._desc}</span></span><span class="ai-export-badge">${active?'●':''}</span>`;
+                    b.style.color = active ? '#fff' : '';
+                });
+            };
+        };
+    }
+
+    function injectionMenu(menu) {
+        menu.appendChild(mkEl('div', { className:'ai-export-section-label', text:'First-prompt injection' }));
+        const armBtn = mkEl('button', { className:'ai-export-menu-item' });
+        armBtn.onclick = e => {
+            e.stopPropagation();
+            const on = !injArmed();
+            CFG.injection = { ...(CFG.injection || DEFAULTS.injection), enabled:on, sites:{ ...(CFG.injection?.sites || {}), [P]:on } };
+            saveCfg(CFG); refreshPills();
+        };
+        menu.appendChild(armBtn);
+        const rearm = mkEl('button', { className:'ai-export-menu-item' });
+        rearm.innerHTML = `<span style="flex:1">Re-arm for this tab</span>`;
+        rearm.onclick = e => { e.stopPropagation(); try { sessionStorage.removeItem(INJECTED_KEY); } catch(_) {} refreshPills(); };
+        menu.appendChild(rearm);
+        return () => {
+            armBtn.innerHTML = `<span style="flex:1">${injArmed()?'Armed':'Disabled'}</span><span class="ai-export-badge">${injArmed()?(injSpent()?'SPENT':'READY'):'OFF'}</span>`;
+        };
+    }
+
+    function exportMenu(menu, box) {
+        const label = t => menu.appendChild(mkEl('div', { className:'ai-export-section-label', text:t }));
+        const btn = (name, badge, fn) => {
+            const b = mkEl('button', { className:'ai-export-menu-item' });
+            b.innerHTML = `<span>${name}</span><span class="ai-export-badge">${badge}</span>`;
+            b.onclick = e => { e.stopPropagation(); b.classList.add('clicked'); setTimeout(() => { b.classList.remove('clicked'); box.classList.remove('open'); fn(); }, 160); };
+            menu.appendChild(b);
+        };
+        label('Download');
+        btn('Markdown','.MD',()=>fileExport('md'));
+        btn('JSON','.JSON',()=>fileExport('json'));
+        btn('CSV','.CSV',()=>fileExport('csv'));
+        btn('Plain text','.TXT',()=>fileExport('txt'));
+        btn('HTML','.HTML',()=>fileExport('html'));
+        menu.appendChild(mkEl('div', { className:'ai-export-menu-divider' }));
+        btn('Settings','',()=>openDashboard());
+        return null;
+    }
+
+    const PILL_MENUS = {
+        export:    exportMenu,
+        caveman:   modeMenu('caveman','Caveman (prose)',[['lite','Lite','Tight prose, no filler'],['full','Full','Terse, fragments OK'],['ultra','Ultra','Max compression']]),
+        ponytail:  modeMenu('ponytail','Ponytail (code)',[['lite','Lite','Simplest thing that works'],['full','Full','Lazy senior dev'],['ultra','Ultra','YAGNI extremist']]),
+        injection: injectionMenu,
+    };
+
+    function makePill(key) {
+        const box = mkEl('div', { className:'ai-export-drag-box' });
+        box.id = `lance-pill-${key}`;
+        const s = PILL_STATE[key]();
+        const mark = key === 'export'
+            ? LANCE_ICON
+            : `<span class="lance-pill-icon lance-pill-mark" style="font-size:13px;font-weight:700">${s.mark}</span>`;
+        box.innerHTML = `<div class="lance-pill-inner">${mark}<span class="lance-pill-text" style="font-size:13px;font-weight:700;letter-spacing:0.05em">${s.label}</span></div>`;
+
+        const menu = mkEl('div', { className:'ai-export-menu-panel' });
+        const sync = PILL_MENUS[key](menu, box);
         box.appendChild(menu);
         document.body.appendChild(box);
-        cavemanBox = box;
+        pills[key] = { box, menu, sync };
 
-        const sx = GM_getValue('cx', window.innerWidth  - 160);
-        const sy = GM_getValue('cy', window.innerHeight - 55);
-        box.style.left = Math.max(0, Math.min(sx, window.innerWidth  - 120)) + 'px';
-        box.style.top  = Math.max(0, Math.min(sy, window.innerHeight -  40)) + 'px';
-        updateCavemanPill();
-
-        let drag=false, moved=false, dX0, dY0, iL, iT;
-        box.onmousedown = e => { drag=true; moved=false; dX0=e.clientX; dY0=e.clientY; iL=box.offsetLeft; iT=box.offsetTop; e.preventDefault(); };
+        let drag=false, moved=false, x0, y0, l0, t0;
+        box.onmousedown = e => {
+            if (CFG.dockTopRight) return;
+            drag=true; moved=false; x0=e.clientX; y0=e.clientY; l0=box.offsetLeft; t0=box.offsetTop; e.preventDefault();
+        };
         document.addEventListener('mousemove', e => {
             if (!drag) return;
-            const dx=e.clientX-dX0, dy=e.clientY-dY0;
-            if (Math.abs(dx)>3||Math.abs(dy)>3) moved=true;
-            box.style.left=(iL+dx)+'px'; box.style.top=(iT+dy)+'px';
+            const dx=e.clientX-x0, dy=e.clientY-y0;
+            if (Math.abs(dx)>3 || Math.abs(dy)>3) moved=true;
+            box.style.left=(l0+dx)+'px'; box.style.top=(t0+dy)+'px';
         });
         document.addEventListener('mouseup', () => {
-            if (drag&&moved) { GM_setValue('cx',box.offsetLeft); GM_setValue('cy',box.offsetTop); }
+            if (drag && moved) { const [kx,ky]=PILL_POS[key]; GM_setValue(kx, box.offsetLeft); GM_setValue(ky, box.offsetTop); }
             drag=false;
         });
-
         box.onclick = () => {
             if (moved) return;
-            if (!box.classList.contains('open')) {
-                const rect=box.getBoundingClientRect(), isB=rect.top>window.innerHeight/2, isR=rect.left>window.innerWidth/2;
-                menu.className = 'ai-export-menu-panel';
-                menu.classList.add(isB ? isR ? 'pos-bottom-right':'pos-bottom-left' : isR ? 'pos-top-right':'pos-top-left');
-                menu.querySelectorAll('.cave-lvl-btn').forEach(b => b._refresh?.());
-                menu.querySelectorAll('.pony-lvl-btn').forEach(b => b._refresh?.());
-                updateToggleBtn(); updatePonyBtn(); refreshInj();
-                box.classList.add('open');
-            } else {
-                box.classList.remove('open');
-            }
+            if (box.classList.contains('open')) { box.classList.remove('open'); return; }
+            Object.values(pills).forEach(p => p.box.classList.remove('open'));   // one menu at a time
+            const r=box.getBoundingClientRect(), isB=r.top>window.innerHeight/2, isR=r.left>window.innerWidth/2;
+            menu.className='ai-export-menu-panel';
+            menu.classList.add(isB ? (isR?'pos-bottom-right':'pos-bottom-left') : (isR?'pos-top-right':'pos-top-left'));
+            sync?.();
+            box.classList.add('open');
         };
-        document.addEventListener('click', e => { if (!cavemanBox?.contains(e.target)) cavemanBox?.classList.remove('open'); });
+        document.addEventListener('click', e => { if (!box.contains(e.target)) box.classList.remove('open'); });
+        return box;
+    }
 
-        // Mouse-click send intercept — capture phase, preventDefault, re-fire after inject
+    // Mouse-click send intercept — capture phase, preventDefault, re-fire after inject.
+    let sendInterceptOn = false;
+    function installSendIntercept() {
+        if (sendInterceptOn || P === 'brave') return;
+        sendInterceptOn = true;
         document.addEventListener('click', e => {
-            if (!CFG.caveman?.enabled) return;
+            if (!anyModeArmed()) return;
             const sb = findSubmit();
             if (!sb || !(e.target===sb || sb.contains(e.target))) return;
             const el = getChatInput();
             if (!el) return;
             const cur = getInputText(el);
-            if (!cur || cur.startsWith('[Caveman')) return;
+            if (!cur || /^\[(Caveman|Ponytail|Session context)/.test(cur)) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             clickSendWithCaveman();   // waits for flush + re-finds button (BUG-01)
         }, true);
+    }
+
+    function initPills() {
+        PILL_ORDER.forEach(key => {
+            if (!pillAvailable(key)) { pills[key]?.box.remove(); delete pills[key]; return; }
+            if (pills[key] && document.body.contains(pills[key].box)) return;
+            makePill(key);
+        });
+        applyDock();
+        refreshPills();
+        installSendIntercept();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -918,6 +958,15 @@
         });
         dlg.appendChild(sitesPanel);
 
+        // ── Placement ──
+        dlg.appendChild(section('Buttons'));
+        dlg.appendChild(rowEl('Dock to top-right',toggle(CFG.dockTopRight??false,v=>{CFG.dockTopRight=v;saveCfg(CFG);applyDock();})));
+        [['export','Export'],['caveman','Caveman'],['ponytail','Ponytail'],['injection','Injection']].forEach(([key,name])=>{
+            dlg.appendChild(rowEl(`Show ${name} button`,toggle(CFG.pills?.[key]??true,v=>{CFG.pills={...(CFG.pills||DEFAULTS.pills),[key]:v};saveCfg(CFG);refreshPills();})));
+        });
+        const dockNote=document.createElement('div');dockNote.textContent='Docked, the buttons sit square at the top-right and drag is off. Off, each floats where you last dragged it.';
+        Object.assign(dockNote.style,{fontSize:'10px',color:fg2,padding:'6px 0 0'});dlg.appendChild(dockNote);
+
         // ── Keyboard ──
         dlg.appendChild(section('Send shortcut (+ Enter)'));
         [['ctrl','Ctrl + Enter'],['meta','Cmd / Win + Enter'],['alt','Alt / Option + Enter']].forEach(([key,label])=>{
@@ -926,17 +975,17 @@
 
         // ── Caveman ──
         dlg.appendChild(section('Caveman mode'));
-        dlg.appendChild(rowEl('Enable',toggle(CFG.caveman?.enabled??false,v=>{if(!CFG.caveman)CFG.caveman={enabled:false,level:'ultra'};CFG.caveman.enabled=v;saveCfg(CFG);updateCavemanPill();})));
-        dlg.appendChild(rowEl('Level',levelSel(CFG.caveman?.level||'ultra',v=>{CFG.caveman={...(CFG.caveman||DEFAULTS.caveman),level:v};saveCfg(CFG);updateCavemanPill();})));
+        dlg.appendChild(rowEl('Enable',toggle(CFG.caveman?.enabled??false,v=>{if(!CFG.caveman)CFG.caveman={enabled:false,level:'ultra'};CFG.caveman.enabled=v;saveCfg(CFG);refreshPills();})));
+        dlg.appendChild(rowEl('Level',levelSel(CFG.caveman?.level||'ultra',v=>{CFG.caveman={...(CFG.caveman||DEFAULTS.caveman),level:v};saveCfg(CFG);refreshPills();})));
 
         // ── Ponytail ──
         dlg.appendChild(section('Ponytail mode — code answers'));
-        dlg.appendChild(rowEl('Enable',toggle(CFG.ponytail?.enabled??false,v=>{CFG.ponytail={...(CFG.ponytail||DEFAULTS.ponytail),enabled:v};saveCfg(CFG);updateCavemanPill();})));
+        dlg.appendChild(rowEl('Enable',toggle(CFG.ponytail?.enabled??false,v=>{CFG.ponytail={...(CFG.ponytail||DEFAULTS.ponytail),enabled:v};saveCfg(CFG);refreshPills();})));
         dlg.appendChild(rowEl('Level',levelSel(CFG.ponytail?.level||'full',v=>{CFG.ponytail={...(CFG.ponytail||DEFAULTS.ponytail),level:v};saveCfg(CFG);})));
 
         // ── First-prompt injection ──
         dlg.appendChild(section('First-prompt injection'));
-        dlg.appendChild(rowEl('Enable',toggle(CFG.injection?.enabled??false,v=>{CFG.injection={...(CFG.injection||DEFAULTS.injection),enabled:v};saveCfg(CFG);updateCavemanPill();})));
+        dlg.appendChild(rowEl('Enable',toggle(CFG.injection?.enabled??false,v=>{CFG.injection={...(CFG.injection||DEFAULTS.injection),enabled:v};saveCfg(CFG);refreshPills();})));
         Object.keys(INJECTION_PROMPTS).forEach(site=>{
             dlg.appendChild(rowEl(SITE_LABELS[site]||site,toggle(CFG.injection?.sites?.[site]??false,v=>{
                 CFG.injection={...(CFG.injection||DEFAULTS.injection),sites:{...(CFG.injection?.sites||{}),[site]:v}};saveCfg(CFG);
@@ -966,6 +1015,13 @@
         .lance-pill-icon{width:14px;height:14px;flex-shrink:0;text-align:center;line-height:14px;}
         .lance-pill-text{box-sizing:border-box;max-width:0;padding-left:0;opacity:0;overflow:hidden;transition:max-width .22s cubic-bezier(.16,1,.3,1),padding-left .22s cubic-bezier(.16,1,.3,1),opacity .15s;}
         .ai-export-drag-box.open .lance-pill-text{max-width:140px;padding-left:7px;opacity:1;}
+        /* Docked: one fixed row at top-right, square like a site's own header buttons.
+           Flex so an opening button pushes its neighbour instead of overlapping it, and
+           the label stays hidden — docked, these are icon buttons. */
+        #lance-dock{position:fixed;top:10px;right:10px;z-index:2147483646;display:flex;gap:6px;align-items:center;}
+        #lance-dock .ai-export-drag-box{position:relative;top:auto;left:auto;height:34px;min-width:34px;border-radius:10px;cursor:pointer;}
+        #lance-dock .lance-pill-inner{padding:0 10px;}
+        #lance-dock .lance-pill-text{display:none;}
         .ai-export-menu-panel{position:absolute;width:max-content;min-width:185px;background:#18181b;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:4px;display:none;flex-direction:column;gap:1px;box-shadow:0 12px 40px rgba(0,0,0,0.6);}
         .ai-export-drag-box.open>.ai-export-menu-panel{display:flex;}
         .pos-bottom-right{bottom:calc(100% + 12px);right:0;transform-origin:bottom right;animation:aiPopUp .2s cubic-bezier(.16,1,.3,1);}
@@ -982,61 +1038,11 @@
         .ai-export-badge{margin-left:auto;font-size:9px;font-weight:700;letter-spacing:.04em;font-family:monospace;color:rgba(255,255,255,0.2);}
     `);
 
-    // ─── Export button UI ─────────────────────────────────────────────────────
-    function init(){
-        if(CFG.sites[P]===false){qs('.ai-export-drag-box[id="lance-export-box"]')?.remove();return;}
-        if(qs('#lance-export-box'))return;
-
-        const box=mkEl("div",{className:"ai-export-drag-box"});
-        box.id='lance-export-box';
-        box.innerHTML=`<div class="lance-pill-inner">${LANCE_ICON}<span class="lance-pill-text">Export</span></div>`;
-
-        const menu=mkEl("div",{className:"ai-export-menu-panel"});
-        const addLabel=t=>menu.appendChild(Object.assign(document.createElement('div'),{className:'ai-export-section-label',textContent:t}));
-        const addDiv=()=>menu.appendChild(mkEl("div",{className:"ai-export-menu-divider"}));
-        const addBtn=(label,badge,fn)=>{
-            const btn=mkEl("button",{className:'ai-export-menu-item'});
-            btn.innerHTML=`<span>${label}</span><span class="ai-export-badge">${badge}</span>`;
-            btn.onclick=e=>{e.stopPropagation();btn.classList.add('clicked');setTimeout(()=>{btn.classList.remove('clicked');box.classList.remove('open');fn();},160);};
-            menu.appendChild(btn);
-        };
-
-        addLabel("Download");
-        addBtn('Markdown','.MD',()=>fileExport('md'));
-        addBtn('JSON','.JSON',()=>fileExport('json'));
-        addBtn('CSV','.CSV',()=>fileExport('csv'));
-        addBtn('Plain text','.TXT',()=>fileExport('txt'));
-        addBtn('HTML','.HTML',()=>fileExport('html'));
-        addDiv();
-        addBtn('Settings','',()=>openDashboard());
-
-        box.appendChild(menu);document.body.appendChild(box);
-
-        const sX=GM_getValue('x',window.innerWidth-160),sY=GM_getValue('y',window.innerHeight-100);
-        box.style.left=Math.max(0,Math.min(sX,window.innerWidth-120))+'px';
-        box.style.top=Math.max(0,Math.min(sY,window.innerHeight-60))+'px';
-
-        let drag=false,moved=false,sX0,sY0,iL,iT;
-        box.onmousedown=e=>{drag=true;moved=false;sX0=e.clientX;sY0=e.clientY;iL=box.offsetLeft;iT=box.offsetTop;e.preventDefault();};
-        document.onmousemove=e=>{if(!drag)return;const dx=e.clientX-sX0,dy=e.clientY-sY0;if(Math.abs(dx)>3||Math.abs(dy)>3)moved=true;box.style.left=(iL+dx)+'px';box.style.top=(iT+dy)+'px';};
-        document.onmouseup=()=>{if(drag&&moved){GM_setValue('x',box.offsetLeft);GM_setValue('y',box.offsetTop);}drag=false;};
-        box.onclick=()=>{
-            if(moved)return;
-            if(!box.classList.contains('open')){
-                const rect=box.getBoundingClientRect(),isB=rect.top>window.innerHeight/2,isR=rect.left>window.innerWidth/2;
-                menu.className='ai-export-menu-panel';
-                menu.classList.add(isB?isR?'pos-bottom-right':'pos-bottom-left':isR?'pos-top-right':'pos-top-left');
-                box.classList.add('open');
-            } else box.classList.remove('open');
-        };
-        document.addEventListener("click",e=>{if(!box.contains(e.target))box.classList.remove('open');});
-    }
-
     GM_registerMenuCommand("Settings",openDashboard);
 
     if(typeof trustedTypes!=="undefined"&&trustedTypes.defaultPolicy===null)
         trustedTypes.createPolicy("default",{createHTML:s=>s,createScriptURL:s=>s,createScript:s=>s});
 
-    setTimeout(()=>{init();initCavemanPill();UT.init();},1000);
-    setInterval(()=>{init();initCavemanPill();updateCavemanPill();},3000);
+    setTimeout(()=>{initPills();UT.init();},1000);
+    setInterval(()=>{initPills();refreshPills();},3000);
 })();
